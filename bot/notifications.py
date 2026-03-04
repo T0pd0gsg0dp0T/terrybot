@@ -19,8 +19,8 @@ def send_os_notification(title: str, message: str, icon: str = "dialog-informati
     Returns a status string.
     """
     system = platform.system()
-    title = title[:128].replace('"', "'")
-    message = message[:256].replace('"', "'")
+    title = title[:128].replace("\\", "\\\\").replace('"', "'")
+    message = message[:256].replace("\\", "\\\\").replace('"', "'")
 
     try:
         if system == "Linux":

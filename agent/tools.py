@@ -56,6 +56,12 @@ MAX_SNAPSHOT_BYTES = 8 * 1024  # 8KB browser snapshot
 DNS_TIMEOUT = 5.0            # seconds for SSRF hostname DNS resolution
 SHELL_TIMEOUT = 30           # seconds for system_run subprocess
 
+# Shared executor for DNS lookups — avoids spawning a new thread pool per call.
+# max_workers=2 allows two concurrent SSRF checks (e.g. fetch_url + browser_navigate).
+_DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="terrybot-dns"
+)
+
 # Granular httpx timeouts: connect and read are budgeted separately so a
 # slow-to-connect host can't eat the entire read-timeout budget.
 _HTTPX_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
@@ -1089,11 +1095,10 @@ def _check_ssrf(hostname: str) -> str | None:
     # We use a thread + future rather than mutating socket.setdefaulttimeout(),
     # which is a global side-effect that would be unsafe under concurrent use.
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
-            )
-            results = future.result(timeout=DNS_TIMEOUT)
+        future = _DNS_EXECUTOR.submit(
+            socket.getaddrinfo, hostname, None, 0, socket.SOCK_STREAM
+        )
+        results = future.result(timeout=DNS_TIMEOUT)
     except concurrent.futures.TimeoutError:
         return "Error: DNS resolution timed out."
     except socket.gaierror:

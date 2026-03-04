@@ -26,11 +26,15 @@ def test_get_datetime_returns_iso8601():
 
 def test_save_and_load_note_round_trip(tmp_path, monkeypatch):
     """save_note then load_note should return the same content."""
+    import agent.tools
     import crypto
 
-    # Redirect the credential store to a temp dir
+    # Redirect the credential store to a temp dir and reset the singleton
+    # so it re-initialises with the patched paths (not ~/.terrybot/).
     monkeypatch.setattr(crypto, "TERRYBOT_DIR", tmp_path)
     monkeypatch.setattr(crypto, "CREDS_DIR", tmp_path / "creds")
+    monkeypatch.setattr(crypto, "SECRET_KEY_PATH", tmp_path / "secret.key")
+    monkeypatch.setattr(agent.tools, "_credential_store", None)
 
     result = save_note("test_key", "hello world")
     assert "saved" in result.lower()
@@ -45,9 +49,13 @@ def test_save_note_invalid_key():
 
 
 def test_load_note_missing_key(tmp_path, monkeypatch):
+    import agent.tools
     import crypto
+
     monkeypatch.setattr(crypto, "TERRYBOT_DIR", tmp_path)
     monkeypatch.setattr(crypto, "CREDS_DIR", tmp_path / "creds")
+    monkeypatch.setattr(crypto, "SECRET_KEY_PATH", tmp_path / "secret.key")
+    monkeypatch.setattr(agent.tools, "_credential_store", None)
 
     result = load_note("nonexistent_key")
     assert "no note" in result.lower() or "not found" in result.lower()

@@ -50,7 +50,10 @@ class _UserRateLimiter:
         window_start = now - self._window
         # Evict expired timestamps, then check count
         valid = [t for t in self._timestamps[user_id] if t > window_start]
-        self._timestamps[user_id] = valid
+        if valid:
+            self._timestamps[user_id] = valid
+        else:
+            del self._timestamps[user_id]  # evict empty entry; defaultdict recreates on append
         if len(valid) >= self._max:
             return False
         self._timestamps[user_id].append(now)
