@@ -438,6 +438,18 @@ def _load_user_tools() -> None:
 
 _load_user_tools()
 
+# Module-level CredentialStore singleton — avoids re-deriving the Fernet key
+# (two file reads + HKDF) on every save_note / load_note call.
+_credential_store: Any = None
+
+
+def _get_credential_store():
+    global _credential_store
+    if _credential_store is None:
+        from crypto import CredentialStore
+        _credential_store = CredentialStore()
+    return _credential_store
+
 
 def prune_old_screenshots() -> None:
     """Delete screenshots older than SCREENSHOT_MAX_AGE_DAYS. Called at startup."""
@@ -522,9 +534,7 @@ def save_note(key: str, content: str) -> str:
         return f"Error: Note content exceeds maximum size ({MAX_NOTE_SIZE} bytes)."
 
     try:
-        from crypto import CredentialStore
-        store = CredentialStore()
-        store.store(f"note_{key}", content)
+        _get_credential_store().store(f"note_{key}", content)
         return f"Note '{key}' saved successfully."
     except Exception as e:
         print(f"[tools] Error saving note '{key}': {type(e).__name__}", file=sys.stderr)
@@ -537,9 +547,7 @@ def load_note(key: str) -> str:
         return "Error: Key must be alphanumeric with underscores only (max 64 chars)."
 
     try:
-        from crypto import CredentialStore
-        store = CredentialStore()
-        value = store.load(f"note_{key}")
+        value = _get_credential_store().load(f"note_{key}")
         if value is None:
             return f"No note found with key '{key}'."
         return value

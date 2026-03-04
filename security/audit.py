@@ -207,6 +207,20 @@ def run_audit(settings: "Settings") -> list[AuditFinding]:
     else:
         findings.append(AuditFinding("OK", "Approved user tools", "No approved_tools directory"))
 
+    # ── sessions.db permissions ──────────────────────────────────────────────
+    sessions_db = TERRYBOT_DIR / "sessions.db"
+    if sessions_db.exists():
+        db_mode = stat.S_IMODE(sessions_db.stat().st_mode)
+        if db_mode == 0o600:
+            findings.append(AuditFinding("OK", "sessions.db permissions", "0o600 — owner-only"))
+        else:
+            findings.append(AuditFinding(
+                "CRITICAL",
+                "sessions.db permissions",
+                f"Got {oct(db_mode)}, expected 0o600 — conversation history may be world-readable. "
+                f"Fix: chmod 600 {sessions_db}",
+            ))
+
     # ── Gmail configuration ──────────────────────────────────────────────────
     if settings.gmail.enabled:
         if not settings.gmail.email:

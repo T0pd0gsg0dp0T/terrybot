@@ -164,6 +164,11 @@ class PersistentSessionStore:
     def _open_db(self) -> sqlite3.Connection:
         self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(str(self.DB_PATH), check_same_thread=False)
+        # Restrict permissions to owner-only on first creation.
+        try:
+            self.DB_PATH.chmod(0o600)
+        except OSError:
+            pass
         db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 session_id TEXT NOT NULL,

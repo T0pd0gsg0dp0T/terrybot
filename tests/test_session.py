@@ -159,6 +159,19 @@ def test_persistent_store_get_finds_meta_only_session(tmp_path, monkeypatch):
     assert found.model == "openai/gpt-4o"
 
 
+def test_persistent_store_db_created_with_600_permissions(tmp_path, monkeypatch):
+    """sessions.db should be created with 0o600 permissions."""
+    import stat as _stat
+    db_path = tmp_path / "sessions.db"
+    monkeypatch.setattr(PersistentSessionStore, "DB_PATH", db_path)
+
+    PersistentSessionStore(max_history_turns=10)
+
+    assert db_path.exists()
+    mode = _stat.S_IMODE(db_path.stat().st_mode)
+    assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
+
+
 def test_persistent_store_compact_prunes_db(tmp_path, monkeypatch):
     db_path = tmp_path / "sessions.db"
     monkeypatch.setattr(PersistentSessionStore, "DB_PATH", db_path)

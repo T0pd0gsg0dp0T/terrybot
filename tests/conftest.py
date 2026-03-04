@@ -80,6 +80,12 @@ class FakeSessionStore:
     def list_sessions(self):
         return list(self._sessions.keys())
 
+    def all_sessions(self):
+        return dict(self._sessions)
+
+    def flush(self, session_id: str) -> None:
+        pass  # no-op: in-memory store
+
 
 class FakeRunner:
     """Minimal LLMRunner stand-in for tool tests."""

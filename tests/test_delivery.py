@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 
-from bot.delivery import DeliveryManager
+from bot.delivery import DeliveryManager, _PENDING_BUFFER_CAP
 
 
 async def test_web_delivery_to_registered_queue():
@@ -45,6 +45,20 @@ async def test_flush_pending_on_reconnect():
     assert not dm._pending
     payload = q.get_nowait()
     assert payload["message"] == "you were away"
+
+
+async def test_pending_buffer_cap_drops_oldest():
+    """Buffer should not grow beyond _PENDING_BUFFER_CAP; oldest message is dropped."""
+    dm = DeliveryManager()
+
+    for i in range(_PENDING_BUFFER_CAP + 5):
+        await dm.deliver("web_offline", f"msg{i}")
+
+    buf = dm._pending["web_offline"]
+    assert len(buf) == _PENDING_BUFFER_CAP
+    # Oldest messages were dropped; most recent should be present
+    assert buf[-1] == f"msg{_PENDING_BUFFER_CAP + 4}"
+    assert "msg0" not in buf
 
 
 async def test_telegram_notify_callback_called():

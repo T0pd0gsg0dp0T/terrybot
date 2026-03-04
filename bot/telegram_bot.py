@@ -131,12 +131,14 @@ class TelegramBot:
             if normalized in ("confirm", "yes"):
                 cmd = session.pending_command
                 session.pending_command = None
+                self._runner._sessions.flush(session_id)
                 output = execute_pending_command(cmd)
                 for chunk in _split_message(f"Output:\n{output}"):
                     await update.message.reply_text(chunk)
                 return
             elif normalized in ("deny", "no", "cancel"):
                 session.pending_command = None
+                self._runner._sessions.flush(session_id)
                 await update.message.reply_text("Command cancelled.")
                 return
             else:
@@ -194,8 +196,9 @@ class TelegramBot:
         user = update.effective_user
         if user is None or not self._is_allowed(user.id):
             return
-        turns = self._runner.get_session_history_turns(str(user.id))
-        model = self._settings.agent.model
+        session_id = str(user.id)
+        turns = self._runner.get_session_history_turns(session_id)
+        model = self._runner._model_for_session(session_id)
         await update.message.reply_text(  # type: ignore[union-attr]
             f"Model: {model}\n"
             f"History turns: {turns}\n"
@@ -219,8 +222,3 @@ class TelegramBot:
 
         return app
 
-    def run(self) -> None:
-        """Start the Telegram bot (blocking)."""
-        app = self.build_application()
-        print(f"[telegram] Starting bot (allowed users: {sorted(self._allowed_ids)})")
-        app.run_polling(drop_pending_updates=True)

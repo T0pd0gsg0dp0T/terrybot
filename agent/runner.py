@@ -121,7 +121,7 @@ class LLMRunner:
             {"role": "system", "content": "Summarize this conversation in 2-3 sentences:"},
             {"role": "user", "content": history_text},
         ]
-        data, _ = await self._call_openrouter(summary_msgs, model=self._model())
+        data, _ = await self._call_openrouter(summary_msgs, model=self._model_for_session(session_id))
         if not data:
             return "Compact failed: could not reach AI service."
 

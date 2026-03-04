@@ -19,6 +19,9 @@ from collections import defaultdict
 from typing import Any, Callable, Coroutine, Optional
 
 
+_PENDING_BUFFER_CAP = 100  # max buffered messages per session (oldest dropped when exceeded)
+
+
 class DeliveryManager:
     """Routes scheduled/heartbeat messages to live channels."""
 
@@ -80,8 +83,15 @@ class DeliveryManager:
                     pass
             return
 
-        # No active channel — buffer for later delivery
-        self._pending[session_id].append(message)
+        # No active channel — buffer for later delivery (capped to avoid unbounded growth)
+        buf = self._pending[session_id]
+        if len(buf) >= _PENDING_BUFFER_CAP:
+            buf.pop(0)  # drop oldest when cap is reached
+            print(
+                f"[delivery] Buffer full for {session_id!r} — oldest message dropped",
+                file=sys.stderr,
+            )
+        buf.append(message)
         print(
             f"[delivery] Buffered message for offline session {session_id!r}",
             file=sys.stderr,

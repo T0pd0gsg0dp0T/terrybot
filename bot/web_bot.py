@@ -721,10 +721,12 @@ def create_app(
                         if normalized in ("confirm", "yes"):
                             cmd = session.pending_command
                             session.pending_command = None
+                            runner._sessions.flush(session_id)
                             output = execute_pending_command(cmd)
                             await websocket.send_json({"type": "message", "content": f"Output:\n{output}"})
                         elif normalized in ("deny", "no", "cancel"):
                             session.pending_command = None
+                            runner._sessions.flush(session_id)
                             await websocket.send_json({"type": "message", "content": "Command cancelled."})
                         else:
                             await websocket.send_json({
