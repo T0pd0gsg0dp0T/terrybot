@@ -1,0 +1,58 @@
+# Terrybot Configuration Example
+# Copy to terrybot.yaml and fill in your values.
+# Secrets (api_key, bot_token, auth_token) are stored encrypted via `python main.py setup`
+# and are NOT loaded from this file — leave them blank here.
+
+openrouter:
+  # Do NOT put your real API key here. Run `python main.py setup` to encrypt it.
+  api_key: ""
+  model: "anthropic/claude-sonnet-4-6"
+  # Optional fallback models used when primary is rate-limited (429/529).
+  # Models are tried in order; context is preserved across failover.
+  fallback_models:
+    - "anthropic/claude-haiku-4-5"
+    - "openai/gpt-4o-mini"
+
+telegram:
+  # Do NOT put your real bot token here. Run `python main.py setup` to encrypt it.
+  bot_token: ""
+  # List of Telegram user IDs allowed to use the bot (DMs).
+  # Get your user ID from @userinfobot on Telegram.
+  allowed_user_ids:
+    - 123456789
+  # List of group/supergroup chat IDs the bot will respond in.
+  # Group/supergroup IDs are negative numbers (e.g. -100123456789).
+  allowed_group_ids: []
+  # When true, bot only responds in groups when @mentioned by username.
+  require_mention_in_groups: true
+
+web:
+  # SECURITY: Never change host to 0.0.0.0 — that exposes to the network.
+  host: "127.0.0.1"
+  port: 8765
+  # Do NOT put your real auth token here. Run `python main.py setup` to generate and encrypt it.
+  auth_token: ""
+
+agent:
+  model: "anthropic/claude-sonnet-4-6"
+  # Maximum conversation turns kept in memory per session.
+  max_history_turns: 20
+  # Set to true to enable the system_run tool (shell command execution).
+  # Users are prompted to confirm before commands run.
+  # WARNING: This allows arbitrary shell execution — use with caution.
+  allow_system_run: false
+
+scheduler:
+  # Scheduled jobs that inject messages into sessions at cron-defined times.
+  # Responses are delivered via Telegram (for numeric session_ids) or logged.
+  jobs: []
+  # Example:
+  # jobs:
+  #   - id: "morning_brief"
+  #     cron: "0 9 * * 1-5"          # 9am Mon-Fri
+  #     session_id: "123456789"       # Telegram user ID (string)
+  #     message: "Give me a morning briefing."
+  #   - id: "hourly_check"
+  #     cron: "0 * * * *"            # Every hour
+  #     session_id: "group_-100123456789"
+  #     message: "Any updates?"
