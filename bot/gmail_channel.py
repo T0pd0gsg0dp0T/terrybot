@@ -14,6 +14,7 @@ For Gmail with 2FA, use an App Password:
 
 from __future__ import annotations
 
+import asyncio
 import email
 import email.header
 import imaplib
@@ -88,6 +89,41 @@ class GmailChannel:
             print(f"[gmail] Failed to load password: {type(e).__name__}", file=sys.stderr)
             return False
 
+    def _fetch_unseen_emails(self) -> list[dict]:
+        """
+        Blocking IMAP fetch — runs in a thread via asyncio.to_thread().
+        Returns a list of dicts with keys: sender, subject, body.
+        """
+        mail = imaplib.IMAP4_SSL(self._cfg.imap_host, self._cfg.imap_port)
+        try:
+            mail.login(self._cfg.email, self._password)
+            mail.select(self._cfg.label)
+
+            _, data = mail.search(None, "UNSEEN")
+            uid_list = data[0].split() if data[0] else []
+            uids = uid_list[-self._cfg.max_per_poll:]  # newest N
+
+            results = []
+            for uid in uids:
+                _, msg_data = mail.fetch(uid, "(RFC822)")
+                if not msg_data or not msg_data[0]:
+                    continue
+                raw = msg_data[0][1]
+                if not isinstance(raw, bytes):
+                    continue
+                msg = email.message_from_bytes(raw)
+                results.append({
+                    "sender": _decode_header(msg.get("From")),
+                    "subject": _decode_header(msg.get("Subject")),
+                    "body": _extract_body(msg),
+                })
+            return results
+        finally:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
     async def poll(self) -> None:
         """Fetch unseen emails and inject them as session messages."""
         if not self._cfg.enabled:
@@ -102,47 +138,24 @@ class GmailChannel:
             return
 
         try:
-            mail = imaplib.IMAP4_SSL(self._cfg.imap_host, self._cfg.imap_port)
-            mail.login(self._cfg.email, self._password)
-            mail.select(self._cfg.label)
-
-            _, data = mail.search(None, "UNSEEN")
-            uid_list = data[0].split() if data[0] else []
-            uids = uid_list[-self._cfg.max_per_poll:]  # newest N
-
-            for uid in uids:
-                _, msg_data = mail.fetch(uid, "(RFC822)")
-                if not msg_data or not msg_data[0]:
-                    continue
-                raw = msg_data[0][1]
-                if not isinstance(raw, bytes):
-                    continue
-
-                msg = email.message_from_bytes(raw)
-                subject = _decode_header(msg.get("Subject"))
-                sender = _decode_header(msg.get("From"))
-                body = _extract_body(msg)
-
-                injected = (
-                    f"[EMAIL] From: {sender}\n"
-                    f"Subject: {subject}\n\n"
-                    f"{body}"
-                )
-
-                print(f"[gmail] New email from {sender!r}: {subject!r}", file=sys.stderr)
-
-                try:
-                    response = await self._runner.run_turn(session_id, injected)
-                    await self._notify(session_id, response)
-                except Exception as e:
-                    print(f"[gmail] run_turn error: {type(e).__name__}: {e}", file=sys.stderr)
-
-            mail.logout()
-
+            # Run blocking IMAP I/O in a thread so the event loop stays free
+            emails = await asyncio.to_thread(self._fetch_unseen_emails)
         except imaplib.IMAP4.error as e:
             print(f"[gmail] IMAP error: {e}", file=sys.stderr)
+            return
         except Exception as e:
             print(f"[gmail] Poll error: {type(e).__name__}: {e}", file=sys.stderr)
+            return
+
+        for item in emails:
+            sender, subject, body = item["sender"], item["subject"], item["body"]
+            injected = f"[EMAIL] From: {sender}\nSubject: {subject}\n\n{body}"
+            print(f"[gmail] New email from {sender!r}: {subject!r}", file=sys.stderr)
+            try:
+                response = await self._runner.run_turn(session_id, injected)
+                await self._notify(session_id, response)
+            except Exception as e:
+                print(f"[gmail] run_turn error: {type(e).__name__}: {e}", file=sys.stderr)
 
     def start(self, scheduler) -> None:
         """Register poll job with an existing APScheduler instance."""

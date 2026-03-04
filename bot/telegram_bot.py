@@ -29,7 +29,6 @@ from agent.runner import LLMRunner
 from agent.tools import execute_pending_command
 
 if TYPE_CHECKING:
-    from bot.delivery import DeliveryManager
     from config import Settings
 
 TELEGRAM_MAX_MSG = 4096

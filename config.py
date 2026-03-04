@@ -10,10 +10,8 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional
-
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator
 
 CONFIG_PATH = Path(os.environ.get("TERRYBOT_CONFIG", "terrybot.yaml"))
 EXAMPLE_PATH = Path("terrybot.yaml.example")

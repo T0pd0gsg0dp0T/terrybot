@@ -18,7 +18,6 @@ import asyncio
 import getpass
 import secrets
 import sys
-from pathlib import Path
 
 
 def _require_python() -> None:
@@ -121,9 +120,9 @@ def cmd_setup() -> None:
     print()
     print("=" * 56)
     print(" Setup complete! Next steps:")
-    print(f"  1. Review terrybot.yaml (model, port, etc.)")
-    print(f"  2. python main.py audit      — verify security")
-    print(f"  3. python main.py run --both — start bot + web UI")
+    print("  1. Review terrybot.yaml (model, port, etc.)")
+    print("  2. python main.py audit      — verify security")
+    print("  3. python main.py run --both — start bot + web UI")
     print("=" * 56)
 
 

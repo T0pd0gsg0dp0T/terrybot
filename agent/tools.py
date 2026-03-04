@@ -643,7 +643,7 @@ async def browser_navigate(context: "ToolContext", url: str) -> str:
         return "Error: Invalid URL."
 
     if parsed.scheme not in ("http", "https"):
-        return f"Error: Only http:// and https:// URLs are allowed."
+        return "Error: Only http:// and https:// URLs are allowed."
 
     hostname = parsed.hostname or ""
     if not hostname:
@@ -1007,7 +1007,6 @@ async def dispatch_tool(
         # Check user-approved dynamic tools
         if name in _USER_TOOL_DISPATCH:
             func = _USER_TOOL_DISPATCH[name]
-            import asyncio as _asyncio
             import inspect
             if inspect.iscoroutinefunction(func):
                 if context is not None:

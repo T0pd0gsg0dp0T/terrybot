@@ -17,7 +17,7 @@ import json
 import secrets
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -183,7 +183,7 @@ def verify_token(
     # An empty stored_token means auth is not configured — always fail.
     if not stored_token:
         rl.record_failure(client_ip)
-        print(f"[auth] Failed auth: stored token is not configured", file=sys.stderr)
+        print("[auth] Failed auth: stored token is not configured", file=sys.stderr)
         return AuthResult(success=False, reason="Invalid token.")
 
     match = secrets.compare_digest(provided_digest, stored_digest)
@@ -193,7 +193,7 @@ def verify_token(
         return AuthResult(success=True, reason="Authenticated.")
     else:
         rl.record_failure(client_ip)
-        print(f"[auth] Failed auth: token mismatch", file=sys.stderr)
+        print("[auth] Failed auth: token mismatch", file=sys.stderr)
         return AuthResult(success=False, reason="Invalid token.")
 
 
