@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from telegram import Update
 from telegram.ext import (
@@ -207,7 +207,7 @@ class TelegramBot:
             f"Max turns: {self._settings.agent.max_history_turns}"
         )
 
-    def build_application(self) -> Application:
+    def build_application(self) -> Application[Any, Any, Any, Any, Any, Any]:
         """Build and configure the telegram Application."""
         token = self._settings.telegram.bot_token
         if not token:

@@ -55,7 +55,7 @@ class BrowserManager:
             print(f"[browser] Failed to launch Chromium: {type(e).__name__}: {e}", file=sys.stderr)
             raise
 
-    async def get_or_create_page(self, session_id: str):
+    async def get_or_create_page(self, session_id: str) -> Any:
         """Return existing page for session, or create one (evicting oldest if at cap)."""
         if session_id not in self._pages:
             if self._browser is None:

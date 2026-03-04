@@ -182,7 +182,7 @@ def load_approved_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             if spec is None or spec.loader is None:
                 continue
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # type: ignore[attr-defined]
+            spec.loader.exec_module(module)
 
             tool_def = getattr(module, "TOOL_DEFINITION", None)
             func = getattr(module, name, None) or getattr(module, "run", None)

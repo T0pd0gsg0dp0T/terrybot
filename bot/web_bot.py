@@ -36,7 +36,8 @@ from typing import TYPE_CHECKING, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from agent.runner import LLMRunner
 from agent.tools import execute_pending_command
@@ -46,6 +47,7 @@ from security.origin import validate_ws_origin
 
 if TYPE_CHECKING:
     from config import Settings
+    from bot.scheduler import TerryScheduler
 
 WS_RATE_LIMIT_REQUESTS = 20
 WS_RATE_LIMIT_WINDOW = 60.0
@@ -309,7 +311,7 @@ _DASH_STYLE_HASHES = " ".join(_csp_hash(b) for b in _dash_style_blocks)
 # ── Security headers middleware ───────────────────────────────────────────────
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         path = request.url.path
         if path.startswith("/dashboard"):
@@ -363,7 +365,7 @@ def _render_sessions(runner: LLMRunner) -> str:
     )
 
 
-def _render_jobs(scheduler) -> str:
+def _render_jobs(scheduler: "TerryScheduler | None") -> str:
     if scheduler is None:
         return '<p class="empty">Scheduler not running.</p>'
     jobs = scheduler.underlying.get_jobs()
@@ -426,7 +428,7 @@ def create_app(
     settings: "Settings",
     runner: LLMRunner,
     delivery: Optional[DeliveryManager] = None,
-    scheduler=None,
+    scheduler: "TerryScheduler | None" = None,
 ) -> FastAPI:
     """Create and configure the FastAPI app."""
 
@@ -492,7 +494,7 @@ def create_app(
         return HTMLResponse(content=html)
 
     @app.post("/dashboard/tools/{name}/approve")
-    async def dashboard_approve(name: str, request: Request):
+    async def dashboard_approve(name: str, request: Request) -> HTMLResponse | RedirectResponse:
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
@@ -504,7 +506,7 @@ def create_app(
         return RedirectResponse(f"/dashboard?token={token}", status_code=303)
 
     @app.post("/dashboard/tools/{name}/reject")
-    async def dashboard_reject(name: str, request: Request):
+    async def dashboard_reject(name: str, request: Request) -> HTMLResponse | RedirectResponse:
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
@@ -516,7 +518,7 @@ def create_app(
         return RedirectResponse(f"/dashboard?token={token}", status_code=303)
 
     @app.post("/dashboard/tools/{name}/remove-approved")
-    async def dashboard_remove(name: str, request: Request):
+    async def dashboard_remove(name: str, request: Request) -> HTMLResponse | RedirectResponse:
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
@@ -674,7 +676,7 @@ def create_app(
         # Flush any buffered messages to this client
         delivery.flush_all_pending_to_web(delivery_q)
 
-        async def _delivery_pump():
+        async def _delivery_pump() -> None:
             """Forward delivery queue messages to this WebSocket."""
             while True:
                 payload = await delivery_q.get()

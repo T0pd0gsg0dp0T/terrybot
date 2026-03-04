@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
 if TYPE_CHECKING:
     from agent.runner import LLMRunner
     from config import Settings
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 MAX_BODY_CHARS = 2000  # truncate email body before injecting into session
 
@@ -89,7 +90,7 @@ class GmailChannel:
             print(f"[gmail] Failed to load password: {type(e).__name__}", file=sys.stderr)
             return False
 
-    def _fetch_unseen_emails(self) -> list[dict]:
+    def _fetch_unseen_emails(self) -> list[dict[str, str]]:
         """
         Blocking IMAP fetch — runs in a thread via asyncio.to_thread().
         Returns a list of dicts with keys: sender, subject, body.
@@ -157,7 +158,7 @@ class GmailChannel:
             except Exception as e:
                 print(f"[gmail] run_turn error: {type(e).__name__}: {e}", file=sys.stderr)
 
-    def start(self, scheduler) -> None:
+    def start(self, scheduler: "AsyncIOScheduler") -> None:
         """Register poll job with an existing APScheduler instance."""
         from apscheduler.triggers.interval import IntervalTrigger
         scheduler.add_job(

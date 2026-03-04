@@ -28,7 +28,7 @@ class DeliveryManager:
 
     def __init__(self) -> None:
         # All currently connected WebSocket client queues
-        self._web_queues: list[asyncio.Queue] = []
+        self._web_queues: list[asyncio.Queue[dict[str, str]]] = []
         # Buffered messages for sessions with no active WebSocket.
         # deque(maxlen=N) gives O(1) automatic eviction of oldest entries.
         self._pending: dict[str, deque[str]] = defaultdict(
@@ -46,13 +46,13 @@ class DeliveryManager:
         """Set async callback for Telegram delivery: callback(session_id, text)."""
         self._telegram_notify = callback
 
-    def register_web_client(self) -> asyncio.Queue:
+    def register_web_client(self) -> asyncio.Queue[dict[str, str]]:
         """Register a new WebSocket client. Returns its private delivery queue."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=_WEB_QUEUE_MAXSIZE)
+        q: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=_WEB_QUEUE_MAXSIZE)
         self._web_queues.append(q)
         return q
 
-    def unregister_web_client(self, q: asyncio.Queue) -> None:
+    def unregister_web_client(self, q: asyncio.Queue[dict[str, str]]) -> None:
         """Remove a disconnected WebSocket client's queue."""
         try:
             self._web_queues.remove(q)
@@ -108,7 +108,7 @@ class DeliveryManager:
         buf = self._pending.pop(session_id, None)
         return list(buf) if buf else []
 
-    def flush_all_pending_to_web(self, q: asyncio.Queue) -> None:
+    def flush_all_pending_to_web(self, q: asyncio.Queue[dict[str, str]]) -> None:
         """Push all buffered messages to a newly connected WebSocket client."""
         for sid, messages in list(self._pending.items()):
             for msg in messages:

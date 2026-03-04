@@ -18,6 +18,11 @@ import asyncio
 import getpass
 import secrets
 import sys
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from config import Settings
+    from agent.runner import LLMRunner
 
 
 def _require_python() -> None:
@@ -139,7 +144,7 @@ def _write_config_file(ids_raw: str) -> None:
             user_ids.append(int(part))
 
     # Load existing config if present
-    existing: dict = {}
+    existing: dict[str, Any] = {}
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open(encoding="utf-8") as f:
             existing = yaml.safe_load(f) or {}
@@ -212,7 +217,7 @@ def cmd_reset_session(user_id: int | None) -> None:
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 
-def _load_settings_with_secrets():
+def _load_settings_with_secrets() -> "Settings":
     """Load config and inject encrypted secrets."""
     from config import load_config
     from crypto import CredentialStore
@@ -265,7 +270,7 @@ def cmd_run(telegram: bool, web: bool) -> None:
         print("\n[main] Stopped.", file=sys.stderr)
 
 
-async def _build_telegram_stack(settings, runner):
+async def _build_telegram_stack(settings: "Settings", runner: "LLMRunner") -> tuple[Any, Any, Any]:
     """
     Shared setup for any mode that uses Telegram.
     Returns (tg_app, delivery, scheduler) with the notify callback wired in.
@@ -299,7 +304,7 @@ async def _build_telegram_stack(settings, runner):
     return tg_app, delivery, scheduler
 
 
-async def _run_telegram(settings, runner) -> None:
+async def _run_telegram(settings: "Settings", runner: "LLMRunner") -> None:
     tg_app, delivery, scheduler = await _build_telegram_stack(settings, runner)
     print("[main] Starting Telegram bot...")
     async with tg_app:
@@ -317,7 +322,7 @@ async def _run_telegram(settings, runner) -> None:
             await runner.aclose()
 
 
-async def _run_web(settings, runner) -> None:
+async def _run_web(settings: "Settings", runner: "LLMRunner") -> None:
     import uvicorn
     from bot.delivery import DeliveryManager
     from bot.scheduler import TerryScheduler
@@ -346,7 +351,7 @@ async def _run_web(settings, runner) -> None:
         await runner.aclose()
 
 
-async def _run_both(settings, runner) -> None:
+async def _run_both(settings: "Settings", runner: "LLMRunner") -> None:
     """Run Telegram and web UI concurrently."""
     import uvicorn
     from bot.web_bot import create_app

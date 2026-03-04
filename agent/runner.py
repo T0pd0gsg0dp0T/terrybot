@@ -54,8 +54,14 @@ class LLMRunner:
         )
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client. Call on shutdown."""
+        """Close the HTTP client and browser on shutdown."""
         await self._http_client.aclose()
+        try:
+            from agent.browser import BrowserManager
+            if BrowserManager._instance is not None:
+                await BrowserManager._instance.close()
+        except Exception:
+            pass
 
     # ── Public session management API ─────────────────────────────────────────
     # Use these instead of accessing _sessions directly.

@@ -37,14 +37,15 @@ from urllib.parse import urlparse
 
 # Tracks which sessions are currently in a sessions_send call chain.
 # Used to detect and prevent A→B→A circular message loops.
-_sessions_in_flight: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
-    "_sessions_in_flight", default=frozenset()
+_sessions_in_flight: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "_sessions_in_flight", default=frozenset[str]()
 )
 
 import httpx
 
 if TYPE_CHECKING:
     from agent.context import ToolContext
+    from crypto import CredentialStore
 
 TERRYBOT_DIR = Path.home() / ".terrybot"
 SCREENSHOTS_DIR = TERRYBOT_DIR / "screenshots"
@@ -424,7 +425,7 @@ TOOL_DEFINITIONS = [
 
 # ── User-approved tools (loaded from ~/.terrybot/approved_tools/) ─────────────
 # These are appended at module load. Populated by _load_user_tools() below.
-_USER_TOOL_DEFINITIONS: list[dict] = []
+_USER_TOOL_DEFINITIONS: list[dict[str, Any]] = []
 _USER_TOOL_DISPATCH: dict[str, Any] = {}
 
 
@@ -446,10 +447,10 @@ _load_user_tools()
 
 # Module-level CredentialStore singleton — avoids re-deriving the Fernet key
 # (two file reads + HKDF) on every save_note / load_note call.
-_credential_store: Any = None
+_credential_store: Optional["CredentialStore"] = None
 
 
-def _get_credential_store():
+def _get_credential_store() -> "CredentialStore":
     global _credential_store
     if _credential_store is None:
         from crypto import CredentialStore
@@ -582,7 +583,7 @@ async def sessions_send(context: "ToolContext", target_session_id: str, message:
         response = await context.runner.run_turn(target_session_id, message)
     finally:
         _sessions_in_flight.reset(token)
-    return response
+    return str(response)
 
 
 def canvas_push(context: "ToolContext", html: str) -> str:
@@ -1010,15 +1011,15 @@ async def dispatch_tool(
             import inspect
             if inspect.iscoroutinefunction(func):
                 if context is not None:
-                    return await func(context, **arguments)
-                return await func(**arguments)
+                    return str(await func(context, **arguments))
+                return str(await func(**arguments))
             else:
                 if context is not None:
                     try:
-                        return func(context, **arguments)
+                        return str(func(context, **arguments))
                     except TypeError:
-                        return func(**arguments)
-                return func(**arguments)
+                        return str(func(**arguments))
+                return str(func(**arguments))
         return f"Error: Unknown tool '{name}'."
 
 
@@ -1037,7 +1038,7 @@ class _HTMLStripper(HTMLParser):
         self._buf = StringIO()
         self._skip = False
 
-    def handle_starttag(self, tag: str, attrs: list) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() in ("script", "style"):
             self._skip = True
 
