@@ -136,10 +136,8 @@ def approve_tool(name: str) -> str:
     dst = APPROVED_DIR / f"{name}.py"
     if not src.exists():
         return f"Error: No pending tool named '{name}'."
-    code = src.read_text(encoding="utf-8")
-    dst.write_text(code, encoding="utf-8")
+    src.rename(dst)   # atomic on same filesystem (both under ~/.terrybot/)
     dst.chmod(0o600)
-    src.unlink()
     return f"Tool '{name}' approved. Restart Terrybot (or call /reload-tools) to activate."
 
 

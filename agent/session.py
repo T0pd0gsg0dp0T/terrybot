@@ -25,7 +25,7 @@ class Message:
     role: MessageRole
     content: str
     tool_call_id: Optional[str] = None  # set for role="tool" messages
-    timestamp: float = field(default_factory=time.monotonic)
+    timestamp: float = field(default_factory=time.time)
 
     def to_api_dict(self) -> dict[str, Any]:
         """Convert to OpenRouter/OpenAI message dict format."""

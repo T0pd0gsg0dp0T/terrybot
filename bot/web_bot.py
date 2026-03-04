@@ -355,7 +355,7 @@ def _render_sessions(runner: LLMRunner) -> str:
             f"<tr><td>{_html_escape(sid)}</td>"
             f"<td>{len(s.history)}</td>"
             f"<td>{model}</td>"
-            f"<td>{s.pending_command or ''}</td></tr>"
+            f"<td>{_html_escape(s.pending_command or '')}</td></tr>"
         )
     return (
         "<table><tr><th>Session ID</th><th>Messages</th><th>Model</th><th>Pending cmd</th></tr>"
@@ -449,7 +449,10 @@ def create_app(
         now = time.monotonic()
         window_start = now - 60.0
         ts = [t for t in _webhook_timestamps.get(ip, []) if t > window_start]
-        _webhook_timestamps[ip] = ts
+        if ts:
+            _webhook_timestamps[ip] = ts
+        else:
+            _webhook_timestamps.pop(ip, None)  # evict empty entry
         if len(ts) >= WEBHOOK_RATE_LIMIT_REQUESTS:
             return False
         _webhook_timestamps[ip].append(now)
@@ -756,6 +759,7 @@ def create_app(
             pass
         finally:
             pump_task.cancel()
+            await asyncio.gather(pump_task, return_exceptions=True)
             delivery.unregister_web_client(delivery_q)
             runner.delete_session(session_id)
 

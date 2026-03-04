@@ -104,6 +104,7 @@ class RateLimiter:
         try:
             LOCKOUT_FILE.parent.mkdir(parents=True, exist_ok=True)
             LOCKOUT_FILE.write_text(json.dumps(data))
+            LOCKOUT_FILE.chmod(0o600)
         except Exception:
             pass
 

@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Callable, Coroutine, Optional
 
 
 _PENDING_BUFFER_CAP = 100  # max buffered messages per session (oldest dropped when exceeded)
+_WEB_QUEUE_MAXSIZE = 200   # per-client queue cap; QueueFull → message silently dropped
 
 
 class DeliveryManager:
@@ -28,8 +29,11 @@ class DeliveryManager:
     def __init__(self) -> None:
         # All currently connected WebSocket client queues
         self._web_queues: list[asyncio.Queue] = []
-        # Buffered messages for sessions with no active WebSocket
-        self._pending: dict[str, list[str]] = defaultdict(list)
+        # Buffered messages for sessions with no active WebSocket.
+        # deque(maxlen=N) gives O(1) automatic eviction of oldest entries.
+        self._pending: dict[str, deque[str]] = defaultdict(
+            lambda: deque(maxlen=_PENDING_BUFFER_CAP)
+        )
         # Optional Telegram send callback (wired in main.py)
         self._telegram_notify: Optional[Callable[[str, str], Coroutine[Any, Any, None]]] = None
 
@@ -44,7 +48,7 @@ class DeliveryManager:
 
     def register_web_client(self) -> asyncio.Queue:
         """Register a new WebSocket client. Returns its private delivery queue."""
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=_WEB_QUEUE_MAXSIZE)
         self._web_queues.append(q)
         return q
 
@@ -83,15 +87,17 @@ class DeliveryManager:
                     pass
             return
 
-        # No active channel — buffer for later delivery (capped to avoid unbounded growth)
+        # No active channel — buffer for later delivery.
+        # deque(maxlen=_PENDING_BUFFER_CAP) automatically drops the oldest entry
+        # when the cap is reached, so no explicit size check is needed.
         buf = self._pending[session_id]
-        if len(buf) >= _PENDING_BUFFER_CAP:
-            buf.pop(0)  # drop oldest when cap is reached
+        full_before = len(buf) >= _PENDING_BUFFER_CAP
+        buf.append(message)
+        if full_before:
             print(
                 f"[delivery] Buffer full for {session_id!r} — oldest message dropped",
                 file=sys.stderr,
             )
-        buf.append(message)
         print(
             f"[delivery] Buffered message for offline session {session_id!r}",
             file=sys.stderr,
@@ -99,7 +105,8 @@ class DeliveryManager:
 
     def flush_pending(self, session_id: str) -> list[str]:
         """Return and clear buffered messages for a session (called on web connect)."""
-        return self._pending.pop(session_id, [])
+        buf = self._pending.pop(session_id, None)
+        return list(buf) if buf else []
 
     def flush_all_pending_to_web(self, q: asyncio.Queue) -> None:
         """Push all buffered messages to a newly connected WebSocket client."""
