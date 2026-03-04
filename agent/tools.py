@@ -6,16 +6,17 @@ All tools are:
   - Input-validated before execution
   - Output size-limited
 
-Available tools:
-  - get_datetime: Current date/time in ISO format
-  - fetch_url: HTTP GET with content cleaning (http/https only, 8KB max)
-  - save_note / load_note: Encrypted persistent notes
-  - sessions_list: List active session IDs
-  - sessions_send: Send a message to another session
-  - canvas_push: Push HTML to the web canvas panel
-  - system_run: Execute a shell command (requires confirmation + config opt-in)
-  - browser_navigate / browser_snapshot / browser_screenshot
-  - browser_click / browser_type / browser_fill / browser_upload
+Built-in tools (21):
+  - get_datetime, fetch_url, save_note, load_note
+  - sessions_list, sessions_send, canvas_push, system_run
+  - browser_navigate, browser_snapshot, browser_screenshot
+  - browser_click, browser_type, browser_fill, browser_upload
+  - send_notification, get_location
+  - set_session_model, get_session_model
+  - propose_tool, list_pending_tools
+
+User-approved tools are loaded from ~/.terrybot/approved_tools/ at startup
+and appended to TOOL_DEFINITIONS and the dispatcher automatically.
 """
 
 from __future__ import annotations
@@ -302,7 +303,132 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_notification",
+            "description": "Send a desktop notification to the OS notification centre (Linux/macOS).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Notification title."},
+                    "message": {"type": "string", "description": "Notification body text."},
+                },
+                "required": ["title", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_location",
+            "description": (
+                "Get the current location (city, country, latitude, longitude, timezone). "
+                "Uses IP geolocation by default or a manually configured location."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_session_model",
+            "description": (
+                "Override the AI model for this session. "
+                "Use an OpenRouter model ID, e.g. 'openai/gpt-4o' or 'anthropic/claude-haiku-4-5'. "
+                "Pass empty string to revert to the global default."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "OpenRouter model ID, or empty string to use global default.",
+                    }
+                },
+                "required": ["model"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_session_model",
+            "description": "Get the current AI model in use for this session.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_tool",
+            "description": (
+                "Propose a new tool to add to Terrybot. "
+                "Writes a Python implementation to ~/.terrybot/pending_tools/ for user review and approval. "
+                "The tool becomes active only after the user approves it via /dashboard."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Tool name in snake_case (e.g. 'search_web'). 3-64 chars.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of what the tool does.",
+                    },
+                    "schema": {
+                        "type": "string",
+                        "description": (
+                            "JSON string of the OpenAI function-calling schema for this tool "
+                            "(the 'function' object: name, description, parameters)."
+                        ),
+                    },
+                    "implementation": {
+                        "type": "string",
+                        "description": (
+                            "Complete Python implementation of the tool function. "
+                            "Signature: async def <name>(context: ToolContext, **kwargs) -> str "
+                            "or def <name>(**kwargs) -> str for simple sync tools."
+                        ),
+                    },
+                },
+                "required": ["name", "description", "schema", "implementation"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pending_tools",
+            "description": "List all pending tool proposals awaiting user approval.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
+
+# ── User-approved tools (loaded from ~/.terrybot/approved_tools/) ─────────────
+# These are appended at module load. Populated by _load_user_tools() below.
+_USER_TOOL_DEFINITIONS: list[dict] = []
+_USER_TOOL_DISPATCH: dict[str, Any] = {}
+
+
+def _load_user_tools() -> None:
+    """Load approved tools from ~/.terrybot/approved_tools/ and register them."""
+    global _USER_TOOL_DEFINITIONS, _USER_TOOL_DISPATCH
+    try:
+        from agent.tool_manager import load_approved_tools
+        defs, dispatch = load_approved_tools()
+        _USER_TOOL_DEFINITIONS = defs
+        _USER_TOOL_DISPATCH = dispatch
+        if defs:
+            TOOL_DEFINITIONS.extend(defs)
+    except Exception as e:
+        print(f"[tools] Failed to load user tools: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+_load_user_tools()
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -575,6 +701,91 @@ async def browser_fill(context: "ToolContext", selector: str, value: str) -> str
         return f"Error: {type(e).__name__}: {e}"
 
 
+def send_notification(title: str, message: str) -> str:
+    """Send an OS desktop notification."""
+    from bot.notifications import send_os_notification
+    return send_os_notification(title, message)
+
+
+async def get_location(context: "ToolContext") -> str:
+    """Return current location via IP geolocation or manual config."""
+    import json
+    cfg = context.settings.location
+
+    if cfg.mode == "manual" and (cfg.city or cfg.latitude):
+        return json.dumps({
+            "mode": "manual",
+            "city": cfg.city,
+            "country": cfg.country,
+            "latitude": cfg.latitude,
+            "longitude": cfg.longitude,
+            "timezone": cfg.timezone,
+        })
+
+    # IP geolocation via ipapi.co (free, no key required)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=8.0, write=3.0, pool=2.0)) as client:
+            resp = await client.get(
+                "https://ipapi.co/json/",
+                headers={"User-Agent": "Terrybot/1.0"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return json.dumps({
+                "mode": "ip",
+                "ip": data.get("ip", ""),
+                "city": data.get("city", ""),
+                "region": data.get("region", ""),
+                "country": data.get("country_name", ""),
+                "country_code": data.get("country_code", ""),
+                "latitude": data.get("latitude", 0),
+                "longitude": data.get("longitude", 0),
+                "timezone": data.get("timezone", ""),
+                "org": data.get("org", ""),
+            })
+    except Exception as e:
+        return f"Error: Could not fetch location: {type(e).__name__}: {e}"
+
+
+def set_session_model(context: "ToolContext", model: str) -> str:
+    """Set or clear the per-session model override."""
+    session = context.runner._sessions.get(context.session_id)
+    if session is None:
+        return "Error: session not found."
+    if not model or not model.strip():
+        session.model = None
+        return "Session model cleared — using global default."
+    session.model = model.strip()
+    return f"Session model set to '{session.model}'."
+
+
+def get_session_model(context: "ToolContext") -> str:
+    """Return the current model in use for this session."""
+    session = context.runner._sessions.get(context.session_id)
+    session_model = session.model if session else None
+    global_model = context.settings.agent.model or context.settings.openrouter.model
+    if session_model:
+        return f"Session model: '{session_model}' (overriding global '{global_model}')"
+    return f"Global model: '{global_model}' (no session override)"
+
+
+def _propose_tool(name: str, description: str, schema: str, implementation: str) -> str:
+    """Write a proposed tool to pending_tools for user review."""
+    from agent.tool_manager import propose_tool as _pt
+    return _pt(name, description, schema, implementation)
+
+
+def _list_pending_tools() -> str:
+    """List pending tool proposals."""
+    import json
+    from agent.tool_manager import list_pending
+    pending = list_pending()
+    if not pending:
+        return "No pending tool proposals."
+    summary = [{"name": t["name"], "lines": len(t["code"].splitlines())} for t in pending]
+    return f"{len(pending)} pending tool(s):\n" + json.dumps(summary, indent=2)
+
+
 async def browser_upload(context: "ToolContext", selector: str, file_path: str) -> str:
     """Set a file on an upload input. file_path must be under ~/.terrybot/."""
     resolved = Path(file_path).resolve()
@@ -713,7 +924,61 @@ async def dispatch_tool(
             return "Error: Invalid arguments."
         return await browser_upload(context, selector, file_path)
 
+    elif name == "send_notification":
+        title = arguments.get("title", "")
+        message = arguments.get("message", "")
+        if not isinstance(title, str) or not isinstance(message, str):
+            return "Error: Invalid arguments."
+        return send_notification(title.strip() or "Terrybot", message)
+
+    elif name == "get_location":
+        if context is None:
+            return "Error: No context available."
+        return await get_location(context)
+
+    elif name == "set_session_model":
+        if context is None:
+            return "Error: No context available."
+        model = arguments.get("model", "")
+        if not isinstance(model, str):
+            return "Error: 'model' must be a string."
+        return set_session_model(context, model)
+
+    elif name == "get_session_model":
+        if context is None:
+            return "Error: No context available."
+        return get_session_model(context)
+
+    elif name == "propose_tool":
+        tool_name = arguments.get("name", "")
+        description = arguments.get("description", "")
+        schema = arguments.get("schema", "")
+        implementation = arguments.get("implementation", "")
+        for v in (tool_name, description, schema, implementation):
+            if not isinstance(v, str):
+                return "Error: All arguments must be strings."
+        return _propose_tool(tool_name, description, schema, implementation)
+
+    elif name == "list_pending_tools":
+        return _list_pending_tools()
+
     else:
+        # Check user-approved dynamic tools
+        if name in _USER_TOOL_DISPATCH:
+            func = _USER_TOOL_DISPATCH[name]
+            import asyncio as _asyncio
+            import inspect
+            if inspect.iscoroutinefunction(func):
+                if context is not None:
+                    return await func(context, **arguments)
+                return await func(**arguments)
+            else:
+                if context is not None:
+                    try:
+                        return func(context, **arguments)
+                    except TypeError:
+                        return func(**arguments)
+                return func(**arguments)
         return f"Error: Unknown tool '{name}'."
 
 

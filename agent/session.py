@@ -43,6 +43,7 @@ class Session:
     last_active: float = field(default_factory=time.time)
     canvas_updates: list[str] = field(default_factory=list)
     pending_command: Optional[str] = None
+    model: Optional[str] = None        # per-session model override (None = use global)
 
     def touch(self) -> None:
         self.last_active = time.time()

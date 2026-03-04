@@ -191,13 +191,9 @@ def _load_settings_with_secrets():
     settings = load_config()
     store = CredentialStore()
 
-    api_key = store.load("openrouter_api_key") or ""
-    bot_token = store.load("telegram_bot_token") or ""
-    auth_token = store.load("web_auth_token") or ""
-
-    settings.openrouter.api_key = api_key
-    settings.telegram.bot_token = bot_token
-    settings.web.auth_token = auth_token
+    settings.openrouter.api_key = store.load("openrouter_api_key") or ""
+    settings.telegram.bot_token = store.load("telegram_bot_token") or ""
+    settings.web.auth_token = store.load("web_auth_token") or ""
 
     return settings
 
@@ -208,7 +204,6 @@ def cmd_run(telegram: bool, web: bool) -> None:
 
     settings = _load_settings_with_secrets()
 
-    # Always run audit before starting
     print("[main] Running startup security audit...")
     audit_and_exit_on_critical(settings)
 
@@ -238,102 +233,91 @@ def _run_telegram(settings, runner) -> None:
 
 async def _run_web(settings, runner) -> None:
     import uvicorn
+    from bot.delivery import DeliveryManager
+    from bot.scheduler import TerryScheduler
     from bot.web_bot import create_app
 
-    app = create_app(settings=settings, runner=runner)
+    delivery = DeliveryManager()
+
+    scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
+
+    # Gmail channel (if configured)
+    gmail = None
+    if settings.gmail.enabled and settings.gmail.email:
+        from bot.gmail_channel import GmailChannel
+        gmail = GmailChannel(settings=settings, runner=runner, notify_callback=delivery.deliver)
+        gmail.start(scheduler.underlying)
+
+    app = create_app(settings=settings, runner=runner, delivery=delivery, scheduler=scheduler)
     host = settings.web.host
     port = settings.web.port
     print(f"[main] Starting web UI at http://{host}:{port}")
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
-    scheduler = None
-    if settings.scheduler.jobs:
-        from bot.scheduler import TerryScheduler
-
-        async def _noop_notify(session_id: str, response: str) -> None:
-            print(f"[scheduler] Session {session_id!r}: {response[:100]}", file=sys.stderr)
-
-        scheduler = TerryScheduler(settings=settings, runner=runner, notify_callback=_noop_notify)
-        scheduler.start()
-
+    scheduler.start()
     try:
         await server.serve()
     finally:
-        if scheduler:
-            scheduler.stop()
+        scheduler.stop()
 
 
 async def _run_both(settings, runner) -> None:
     """Run Telegram and web UI concurrently."""
     import uvicorn
+    from bot.delivery import DeliveryManager
+    from bot.scheduler import TerryScheduler
     from bot.telegram_bot import TelegramBot
     from bot.web_bot import create_app
 
-    # FastAPI app
-    app = create_app(settings=settings, runner=runner)
+    # Build Telegram app first so we can use tg_app.bot in delivery callback
+    tg_bot = TelegramBot(settings=settings, runner=runner)
+    tg_app = tg_bot.build_application()
+
+    delivery = DeliveryManager()
+
+    async def _telegram_notify(session_id: str, response: str) -> None:
+        try:
+            if session_id.lstrip("-").isdigit():
+                await tg_app.bot.send_message(chat_id=int(session_id), text=response[:4096])
+            else:
+                print(f"[scheduler] Session {session_id!r}: {response[:100]}", file=sys.stderr)
+        except Exception as e:
+            print(f"[scheduler] Notify failed for {session_id!r}: {type(e).__name__}", file=sys.stderr)
+
+    delivery.set_telegram_notify(_telegram_notify)
+
+    scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
+
+    # Gmail channel (if configured)
+    if settings.gmail.enabled and settings.gmail.email:
+        from bot.gmail_channel import GmailChannel
+        gmail = GmailChannel(settings=settings, runner=runner, notify_callback=delivery.deliver)
+        gmail.start(scheduler.underlying)
+
+    app = create_app(settings=settings, runner=runner, delivery=delivery, scheduler=scheduler)
     host = settings.web.host
     port = settings.web.port
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
-    # Telegram
-    tg_bot = TelegramBot(settings=settings, runner=runner)
-    tg_app = tg_bot.build_application()
-
     print(f"[main] Starting web UI at http://{host}:{port}")
     print(f"[main] Starting Telegram bot...")
 
-    # Scheduler — notify via Telegram for sessions matching "telegram_\d+" or
-    # fallback to stderr log for unknown sessions.
-    scheduler = None
-    if settings.scheduler.jobs:
-        from bot.scheduler import TerryScheduler
-
-        async def _telegram_notify(session_id: str, response: str) -> None:
-            # Session IDs for telegram users are plain str(user_id) — numeric.
-            # Group sessions are "group_<chat_id>".
-            try:
-                if session_id.lstrip("-").isdigit():
-                    await tg_app.bot.send_message(
-                        chat_id=int(session_id),
-                        text=response[:4096],
-                    )
-                else:
-                    print(
-                        f"[scheduler] Session {session_id!r}: {response[:100]}",
-                        file=sys.stderr,
-                    )
-            except Exception as e:
-                print(
-                    f"[scheduler] Notify failed for {session_id!r}: {type(e).__name__}",
-                    file=sys.stderr,
-                )
-
-        scheduler = TerryScheduler(
-            settings=settings, runner=runner, notify_callback=_telegram_notify
-        )
-
-    # `async with tg_app:` calls initialize() on enter and shutdown() on exit.
-    # Do NOT call initialize() or shutdown() manually — that causes double-init
-    # and double-shutdown errors in python-telegram-bot v21+.
     async with tg_app:
         await tg_app.start()
         if tg_app.updater:
             await tg_app.updater.start_polling(drop_pending_updates=True)
 
-        if scheduler:
-            scheduler.start()
+        scheduler.start()
 
         try:
             await server.serve()
         finally:
-            if scheduler:
-                scheduler.stop()
+            scheduler.stop()
             if tg_app.updater:
                 await tg_app.updater.stop()
             await tg_app.stop()
-            # shutdown() is called automatically by __aexit__
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

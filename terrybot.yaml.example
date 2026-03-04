@@ -44,7 +44,7 @@ agent:
 
 scheduler:
   # Scheduled jobs that inject messages into sessions at cron-defined times.
-  # Responses are delivered via Telegram (for numeric session_ids) or logged.
+  # Responses are delivered via Telegram (numeric IDs), web broadcast, or buffered.
   jobs: []
   # Example:
   # jobs:
@@ -53,6 +53,29 @@ scheduler:
   #     session_id: "123456789"       # Telegram user ID (string)
   #     message: "Give me a morning briefing."
   #   - id: "hourly_check"
-  #     cron: "0 * * * *"            # Every hour
+  #     cron: "0 * * * *"
   #     session_id: "group_-100123456789"
   #     message: "Any updates?"
+
+gmail:
+  enabled: false
+  email: "you@gmail.com"           # Gmail address to monitor
+  imap_host: "imap.gmail.com"
+  imap_port: 993
+  poll_interval: 60                # seconds between IMAP polls
+  session_id: "123456789"          # session that receives incoming emails
+  label: "INBOX"
+  max_per_poll: 5
+  # App Password stored encrypted — run: python3.11 main.py setup
+
+notifications:
+  enabled: true                    # OS desktop notifications (notify-send / osascript)
+
+location:
+  mode: "ip"                       # "ip" = auto via ipapi.co  |  "manual" = fixed coords
+  # Used only when mode is "manual":
+  latitude: 0.0
+  longitude: 0.0
+  city: ""
+  country: ""
+  timezone: ""

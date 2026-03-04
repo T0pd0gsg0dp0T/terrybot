@@ -190,6 +190,46 @@ def run_audit(settings: "Settings") -> list[AuditFinding]:
     else:
         findings.append(AuditFinding("OK", "agent.allow_system_run", "Shell execution disabled"))
 
+    # ── Approved user tools ──────────────────────────────────────────────────
+    approved_dir = TERRYBOT_DIR / "approved_tools"
+    if approved_dir.exists():
+        approved = list(approved_dir.glob("*.py"))
+        if approved:
+            names = ", ".join(f.stem for f in approved)
+            findings.append(AuditFinding(
+                "WARN",
+                "Approved user tools",
+                f"{len(approved)} user-approved tool(s) will be loaded at startup: {names}. "
+                "Review at /dashboard.",
+            ))
+        else:
+            findings.append(AuditFinding("OK", "Approved user tools", "None loaded"))
+    else:
+        findings.append(AuditFinding("OK", "Approved user tools", "No approved_tools directory"))
+
+    # ── Gmail configuration ──────────────────────────────────────────────────
+    if settings.gmail.enabled:
+        if not settings.gmail.email:
+            findings.append(AuditFinding(
+                "WARN",
+                "Gmail channel",
+                "gmail.enabled is true but gmail.email is not set.",
+            ))
+        elif not settings.gmail.session_id:
+            findings.append(AuditFinding(
+                "WARN",
+                "Gmail channel",
+                f"gmail.enabled for {settings.gmail.email!r} but gmail.session_id is not set.",
+            ))
+        else:
+            findings.append(AuditFinding(
+                "OK",
+                "Gmail channel",
+                f"Enabled for {settings.gmail.email!r} → session {settings.gmail.session_id!r}",
+            ))
+    else:
+        findings.append(AuditFinding("OK", "Gmail channel", "Disabled"))
+
     return findings
 
 

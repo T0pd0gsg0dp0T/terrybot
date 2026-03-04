@@ -75,6 +75,13 @@ class LLMRunner:
     def _model(self) -> str:
         return self._settings.agent.model or self._settings.openrouter.model
 
+    def _model_for_session(self, session_id: str) -> str:
+        """Return model to use: session override → global agent model → openrouter model."""
+        session = self._sessions.get(session_id)
+        if session and session.model:
+            return session.model
+        return self._model()
+
     def _fallback_models(self) -> list[str]:
         return self._settings.openrouter.fallback_models or []
 
@@ -160,8 +167,8 @@ class LLMRunner:
             {"role": "system", "content": SYSTEM_PROMPT}
         ] + session.get_messages_for_api()
 
-        # Build model failover list
-        primary = self._model()
+        # Build model failover list (session override takes precedence)
+        primary = self._model_for_session(session_id)
         fallbacks = self._fallback_models()
         models = [primary] + fallbacks
         model_idx = 0

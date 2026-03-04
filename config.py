@@ -46,9 +46,6 @@ class WebConfig(BaseModel):
     @field_validator("host")
     @classmethod
     def no_public_bind(cls, v: str) -> str:
-        # Whitelist safe loopback addresses only. Block all variants that bind
-        # to all interfaces: "0.0.0.0" (IPv4), "::" (IPv6), "" (uvicorn treats
-        # as all interfaces), "::ffff:0.0.0.0" (IPv6-mapped IPv4 wildcard).
         _SAFE_HOSTS = {"127.0.0.1", "::1", "localhost"}
         if v not in _SAFE_HOSTS:
             raise ValueError(
@@ -89,12 +86,46 @@ class SchedulerConfig(BaseModel):
     jobs: list[SchedulerJob] = []
 
 
+class GmailConfig(BaseModel):
+    enabled: bool = False
+    email: str = ""                    # Gmail address to monitor (password in cred store)
+    imap_host: str = "imap.gmail.com"
+    imap_port: int = 993
+    poll_interval: int = 60            # seconds between polls
+    session_id: str = ""               # session to inject incoming emails into
+    label: str = "INBOX"              # IMAP label/folder to monitor
+    max_per_poll: int = 5             # max emails to process per poll cycle
+
+
+class NotificationConfig(BaseModel):
+    enabled: bool = True               # OS desktop notifications (notify-send / osascript)
+
+
+class LocationConfig(BaseModel):
+    mode: str = "ip"                   # "ip" = auto via IP geolocation, "manual" = fixed
+    latitude: float = 0.0
+    longitude: float = 0.0
+    city: str = ""
+    country: str = ""
+    timezone: str = ""
+
+    @field_validator("mode")
+    @classmethod
+    def valid_mode(cls, v: str) -> str:
+        if v not in ("ip", "manual"):
+            raise ValueError("location.mode must be 'ip' or 'manual'")
+        return v
+
+
 class Settings(BaseModel):
     openrouter: OpenRouterConfig = OpenRouterConfig()
     telegram: TelegramConfig = TelegramConfig()
     web: WebConfig = WebConfig()
     agent: AgentConfig = AgentConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    gmail: GmailConfig = GmailConfig()
+    notifications: NotificationConfig = NotificationConfig()
+    location: LocationConfig = LocationConfig()
 
 
 def load_config(path: Path = CONFIG_PATH) -> Settings:

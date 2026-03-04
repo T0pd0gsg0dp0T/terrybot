@@ -2,22 +2,20 @@
 bot/scheduler.py — APScheduler cron runner for Terrybot.
 
 Schedules recurring jobs that inject messages into sessions.
-Notify callbacks route responses back to channels:
-  - Web: asyncio.Queue per session_id
-  - Telegram: bot.send_message(chat_id=int(session_id), text=response)
+Uses DeliveryManager to route responses back to the right channel.
 """
 
 from __future__ import annotations
 
-import asyncio
 import sys
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import TYPE_CHECKING
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 if TYPE_CHECKING:
     from agent.runner import LLMRunner
+    from bot.delivery import DeliveryManager
     from config import Settings, SchedulerJob
 
 
@@ -28,10 +26,10 @@ class TerryScheduler:
         self,
         settings: "Settings",
         runner: "LLMRunner",
-        notify_callback: Callable[[str, str], Coroutine[Any, Any, None]],
+        delivery: "DeliveryManager",
     ) -> None:
         self._runner = runner
-        self._notify = notify_callback
+        self._delivery = delivery
         self._scheduler = AsyncIOScheduler()
 
         for job in settings.scheduler.jobs:
@@ -52,6 +50,11 @@ class TerryScheduler:
                     file=sys.stderr,
                 )
 
+    @property
+    def underlying(self) -> AsyncIOScheduler:
+        """Expose the underlying APScheduler for adding jobs (e.g. Gmail poll)."""
+        return self._scheduler
+
     def start(self) -> None:
         self._scheduler.start()
         print("[scheduler] Started.", file=sys.stderr)
@@ -63,7 +66,7 @@ class TerryScheduler:
     async def _run_job(self, job: "SchedulerJob") -> None:
         try:
             response = await self._runner.run_turn(job.session_id, job.message)
-            await self._notify(job.session_id, response)
+            await self._delivery.deliver(job.session_id, response)
         except Exception as e:
             print(
                 f"[scheduler] Job '{job.id}' failed: {type(e).__name__}: {e}",

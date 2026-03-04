@@ -23,7 +23,7 @@ Telegram message / WebSocket message
 | **Web UI** | `http://127.0.0.1:8765` — split-pane chat + canvas panel |
 | **Webhooks** | `POST /webhook/{name}` — trigger sessions from external services |
 
-### Tools (15 hardcoded, no plugin system)
+### Tools (21 built-in + user-approved dynamic tools)
 
 | Tool | Description |
 |------|-------------|
@@ -41,13 +41,25 @@ Telegram message / WebSocket message
 | `browser_type` | Type text into element |
 | `browser_fill` | Fill input field |
 | `browser_upload` | Set file on upload input (path must be under `~/.terrybot/`) |
+| `send_notification` | Push OS desktop notification (notify-send / macOS) |
+| `get_location` | IP geolocation (auto via ipapi.co) or manual coords from config |
+| `set_session_model` | Override the LLM model for this session only |
+| `get_session_model` | Show the model currently in use for this session |
+| `propose_tool` | Agent proposes a new tool (Python code) for human review |
+| `list_pending_tools` | List tools awaiting approval in the dashboard |
 
 ### Other capabilities
 - **Model failover** — primary model rate-limited (429/529)? Transparently retries with configured fallback models, same context preserved
+- **Per-session model** — each session can use a different model via `set_session_model`
 - **`/compact`** — LLM summarises conversation history into one message, freeing context
-- **Cron scheduler** — inject messages into sessions on a schedule (APScheduler), deliver via Telegram or log
+- **Cron scheduler / Heartbeat** — inject messages into sessions on a schedule (APScheduler), deliver via Telegram, web broadcast, or buffer for offline clients
 - **A2UI canvas panel** — right-hand pane in web UI, updated by `canvas_push` / `browser_screenshot`; supports arbitrary HTML and base64 images
 - **`system_run` with confirmation** — bot proposes shell command, user must reply `confirm` or `deny` before it runs
+- **OS Notifications** — desktop alerts via `notify-send` (Linux) or `osascript` (macOS)
+- **Location services** — IP-based geolocation or manually configured coordinates
+- **Gmail channel** — IMAP polling; incoming emails are injected as messages into a configured session (no GCP required — uses App Password)
+- **Self-improvement** — agent proposes new tools as Python code; you approve/reject in the dashboard; approved tools load dynamically at next startup
+- **Control dashboard** — `/dashboard?token=` shows active sessions, scheduler jobs, pending/approved tools with approve/reject buttons
 
 ---
 
@@ -143,7 +155,28 @@ scheduler:
       cron: "0 9 * * 1-5"       # 9am Mon-Fri
       session_id: "123456789"   # Telegram user ID
       message: "Give me a morning briefing."
+
+gmail:
+  enabled: false
+  email: "you@gmail.com"        # Gmail address to monitor
+  poll_interval: 60             # seconds between IMAP polls
+  session_id: "123456789"       # session that receives emails
+  # App Password stored encrypted — run: python3.11 main.py setup
+
+notifications:
+  enabled: true                 # OS desktop notifications
+
+location:
+  mode: "ip"                    # "ip" = auto-detect  |  "manual" = fixed coords
 ```
+
+### Dashboard
+
+The web dashboard is available at `http://127.0.0.1:8765/dashboard?token=YOUR_TOKEN`. It shows:
+- Active sessions (ID, history turns, current model override)
+- Scheduler jobs (ID, cron, next run time)
+- Pending tool proposals (agent-written Python, waiting for your approval)
+- Approved tools (loaded at startup)
 
 ---
 
@@ -208,7 +241,10 @@ user message
 `runner.py` runs up to `MAX_TOOL_ITERATIONS = 5` tool calls per turn, with a hard `RUN_TURN_TIMEOUT = 120s` via `asyncio.timeout`. Session history always gets a paired assistant message in the `finally` block, even on exception.
 
 ### Adding a tool
-All tools are hardcoded — no plugin system.
+
+**Option A — Ask the agent (self-improvement):** Tell Terrybot what you want, it calls `propose_tool`, and the code appears in the dashboard for your review. Approve → it loads on next restart.
+
+**Option B — Hardcode directly:**
 1. Implement the function in `agent/tools.py`
 2. Add its JSON schema to `TOOL_DEFINITIONS`
 3. Add a dispatch branch in `dispatch_tool()`
@@ -230,12 +266,16 @@ terrybot/
 │   ├── context.py           # ToolContext dataclass
 │   ├── runner.py            # OpenRouter LLM runner + failover + compact
 │   ├── sanitize.py          # Input sanitisation + system prompt
-│   ├── session.py           # Per-session history + canvas queue
-│   └── tools.py             # All 15 tool implementations + dispatcher
+│   ├── session.py           # Per-session history + canvas queue + model override
+│   ├── tool_manager.py      # Propose / approve / reject / load user tools
+│   └── tools.py             # All 21 tool implementations + dispatcher
 ├── bot/
+│   ├── delivery.py          # Heartbeat routing (Telegram / web broadcast / buffer)
+│   ├── gmail_channel.py     # IMAP polling → session injection
+│   ├── notifications.py     # OS desktop notifications
 │   ├── scheduler.py         # APScheduler cron runner
 │   ├── telegram_bot.py      # Telegram handler
-│   └── web_bot.py           # FastAPI WebSocket UI + webhook endpoint
+│   └── web_bot.py           # FastAPI WebSocket UI + dashboard + webhook endpoint
 └── security/
     ├── audit.py             # Startup security self-check
     ├── auth.py              # Token verification + IP rate limiter
