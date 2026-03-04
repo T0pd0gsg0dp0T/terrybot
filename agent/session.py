@@ -24,9 +24,7 @@ MAX_MESSAGE_CONTENT_BYTES = 100 * 1024  # 100KB per message — warn if exceeded
 class Message:
     role: MessageRole
     content: str
-    # Optional tool call metadata
-    tool_call_id: Optional[str] = None
-    tool_name: Optional[str] = None
+    tool_call_id: Optional[str] = None  # set for role="tool" messages
     timestamp: float = field(default_factory=time.monotonic)
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -234,14 +232,22 @@ class PersistentSessionStore:
             self._cache[session_id] = self._load_from_db(session_id)
         return self._cache[session_id]
 
+    def _session_exists_in_db(self, session_id: str) -> bool:
+        """Return True if session_id has any rows in messages or session_meta."""
+        row = self._db.execute(
+            "SELECT 1 FROM messages WHERE session_id=? LIMIT 1", (session_id,)
+        ).fetchone()
+        if row:
+            return True
+        row = self._db.execute(
+            "SELECT 1 FROM session_meta WHERE session_id=? LIMIT 1", (session_id,)
+        ).fetchone()
+        return row is not None
+
     def get(self, session_id: str) -> Optional[Session]:
         session_id = str(session_id)
         if session_id not in self._cache:
-            # Check DB to see if it exists
-            row = self._db.execute(
-                "SELECT 1 FROM messages WHERE session_id=? LIMIT 1", (session_id,)
-            ).fetchone()
-            if row is None:
+            if not self._session_exists_in_db(session_id):
                 return None
             self._cache[session_id] = self._load_from_db(session_id)
         return self._cache.get(session_id)
@@ -266,21 +272,30 @@ class PersistentSessionStore:
         return session.history_length() if session else 0
 
     def list_sessions(self) -> list[str]:
-        """Return list of session IDs with at least one message."""
-        rows = self._db.execute(
+        """Return list of known session IDs (messages + metadata tables + cache)."""
+        msg_rows = self._db.execute(
             "SELECT DISTINCT session_id FROM messages"
         ).fetchall()
-        # Merge with in-memory cache (may have sessions with empty history)
-        db_ids = {row[0] for row in rows}
-        cache_ids = set(self._cache.keys())
-        return list(db_ids | cache_ids)
+        meta_rows = self._db.execute(
+            "SELECT session_id FROM session_meta"
+        ).fetchall()
+        db_ids = {row[0] for row in msg_rows} | {row[0] for row in meta_rows}
+        return list(db_ids | set(self._cache.keys()))
 
     def all_sessions(self) -> dict[str, "Session"]:
-        """Return snapshot of all sessions — loads from DB any not yet in cache."""
-        rows = self._db.execute(
+        """Return snapshot of all sessions — loads from DB any not yet in cache.
+
+        Checks both messages and session_meta so sessions with only metadata
+        (e.g., model override set but no messages yet) are included.
+        """
+        msg_rows = self._db.execute(
             "SELECT DISTINCT session_id FROM messages"
         ).fetchall()
-        for (sid,) in rows:
+        meta_rows = self._db.execute(
+            "SELECT session_id FROM session_meta"
+        ).fetchall()
+        all_ids = {row[0] for row in msg_rows} | {row[0] for row in meta_rows}
+        for sid in all_ids:
             if sid not in self._cache:
                 self._cache[sid] = self._load_from_db(sid)
         return dict(self._cache)

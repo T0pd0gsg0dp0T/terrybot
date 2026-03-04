@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # asyncio.timeout() requires Python 3.11+. main.py enforces this at the CLI
 # entry point, but guard here too so an accidental import on 3.10 fails fast
@@ -46,6 +46,16 @@ class LLMRunner:
     def __init__(self, settings: "Settings", sessions: "SessionStore | PersistentSessionStore") -> None:
         self._settings = settings
         self._sessions = sessions
+        # Persistent async HTTP client — reuses TCP/TLS connections across API calls.
+        # Must be closed on shutdown; runner.aclose() handles this.
+        self._http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=HTTP_TIMEOUT, write=10.0, pool=5.0),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+        )
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client. Call on shutdown."""
+        await self._http_client.aclose()
 
     # ── Public session management API ─────────────────────────────────────────
     # Use these instead of accessing _sessions directly.
@@ -301,14 +311,13 @@ class LLMRunner:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                response = await client.post(
-                    f"{OPENROUTER_BASE}/chat/completions",
-                    json=payload,
-                    headers=self._headers(),
-                )
-                response.raise_for_status()
-                return response.json(), False
+            response = await self._http_client.post(
+                f"{OPENROUTER_BASE}/chat/completions",
+                json=payload,
+                headers=self._headers(),
+            )
+            response.raise_for_status()
+            return response.json(), False
 
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
@@ -326,15 +335,3 @@ class LLMRunner:
             print(f"[runner] Unexpected OpenRouter error: {type(e).__name__}", file=sys.stderr)
             return None, False
 
-    async def run_turn_streaming(
-        self,
-        session_id: str,
-        user_text: str,
-    ) -> AsyncIterator[str]:
-        """
-        Streaming variant: yields the complete response after run_turn finishes.
-        (A true streaming implementation would require SSE parsing from OpenRouter.)
-        """
-        result = await self.run_turn(session_id, user_text)
-        if result:
-            yield result

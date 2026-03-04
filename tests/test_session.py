@@ -142,6 +142,23 @@ def test_persistent_store_delete_removes_meta(tmp_path, monkeypatch):
     assert msg_count == 0
 
 
+def test_persistent_store_get_finds_meta_only_session(tmp_path, monkeypatch):
+    """get() should find a session that has metadata but no messages."""
+    db_path = tmp_path / "sessions.db"
+    monkeypatch.setattr(PersistentSessionStore, "DB_PATH", db_path)
+
+    store = PersistentSessionStore(max_history_turns=10)
+    session = store.get_or_create("meta_only")
+    session.model = "openai/gpt-4o"
+    store.flush("meta_only")
+
+    # Fresh store — session is only in session_meta, not messages
+    store2 = PersistentSessionStore(max_history_turns=10)
+    found = store2.get("meta_only")
+    assert found is not None
+    assert found.model == "openai/gpt-4o"
+
+
 def test_persistent_store_compact_prunes_db(tmp_path, monkeypatch):
     db_path = tmp_path / "sessions.db"
     monkeypatch.setattr(PersistentSessionStore, "DB_PATH", db_path)

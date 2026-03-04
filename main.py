@@ -145,26 +145,29 @@ def _write_config_file(ids_raw: str) -> None:
         with CONFIG_PATH.open(encoding="utf-8") as f:
             existing = yaml.safe_load(f) or {}
 
-    # Merge with defaults
-    config = {
-        "openrouter": {
-            "api_key": "",
-            "model": existing.get("openrouter", {}).get("model", "anthropic/claude-sonnet-4-6"),
-        },
-        "telegram": {
-            "bot_token": "",
-            "allowed_user_ids": user_ids or existing.get("telegram", {}).get("allowed_user_ids", []),
-        },
-        "web": {
-            "host": "127.0.0.1",
-            "port": existing.get("web", {}).get("port", 8765),
-            "auth_token": "",
-        },
-        "agent": {
-            "model": existing.get("agent", {}).get("model", "anthropic/claude-sonnet-4-6"),
-            "max_history_turns": existing.get("agent", {}).get("max_history_turns", 20),
-            "persist_sessions": existing.get("agent", {}).get("persist_sessions", True),
-        },
+    # Start with existing config so sections like scheduler/gmail/notifications/location
+    # are preserved across re-runs of setup.
+    config = existing.copy()
+
+    # Update only the sections that setup manages (never overwrite secrets with blanks
+    # if they were already in the file — they shouldn't be, but be defensive).
+    config["openrouter"] = {
+        "api_key": "",
+        "model": existing.get("openrouter", {}).get("model", "anthropic/claude-sonnet-4-6"),
+    }
+    config["telegram"] = {
+        "bot_token": "",
+        "allowed_user_ids": user_ids or existing.get("telegram", {}).get("allowed_user_ids", []),
+    }
+    config["web"] = {
+        "host": "127.0.0.1",
+        "port": existing.get("web", {}).get("port", 8765),
+        "auth_token": "",
+    }
+    config["agent"] = {
+        "model": existing.get("agent", {}).get("model", "anthropic/claude-sonnet-4-6"),
+        "max_history_turns": existing.get("agent", {}).get("max_history_turns", 20),
+        "persist_sessions": existing.get("agent", {}).get("persist_sessions", True),
     }
 
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
@@ -237,6 +240,9 @@ def cmd_run(telegram: bool, web: bool) -> None:
 
     from agent.runner import LLMRunner
     from agent.session import PersistentSessionStore, SessionStore
+    from agent.tools import prune_old_screenshots
+
+    prune_old_screenshots()
 
     if settings.agent.persist_sessions:
         sessions = PersistentSessionStore(max_history_turns=settings.agent.max_history_turns)
@@ -308,6 +314,7 @@ async def _run_telegram(settings, runner) -> None:
             if tg_app.updater:
                 await tg_app.updater.stop()
             await tg_app.stop()
+            await runner.aclose()
 
 
 async def _run_web(settings, runner) -> None:
@@ -336,6 +343,7 @@ async def _run_web(settings, runner) -> None:
         await server.serve()
     finally:
         scheduler.stop()
+        await runner.aclose()
 
 
 async def _run_both(settings, runner) -> None:
@@ -366,6 +374,7 @@ async def _run_both(settings, runner) -> None:
             if tg_app.updater:
                 await tg_app.updater.stop()
             await tg_app.stop()
+            await runner.aclose()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

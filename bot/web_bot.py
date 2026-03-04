@@ -340,7 +340,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 # ── Dashboard HTML helpers ────────────────────────────────────────────────────
 
 def _html_escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    import html as _html
+    return _html.escape(s, quote=True)
 
 
 def _render_sessions(runner: LLMRunner) -> str:
@@ -707,6 +708,11 @@ def create_app(
                     if content.strip() == "/compact":
                         result_text = await runner.compact_session(session_id)
                         await websocket.send_json({"type": "message", "content": result_text})
+                        continue
+
+                    if content.strip() == "/reset":
+                        runner.reset_session(session_id)
+                        await websocket.send_json({"type": "message", "content": "Conversation history cleared."})
                         continue
 
                     session = runner._sessions.get(session_id)

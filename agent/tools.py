@@ -50,6 +50,7 @@ TERRYBOT_DIR = Path.home() / ".terrybot"
 SCREENSHOTS_DIR = TERRYBOT_DIR / "screenshots"
 
 MAX_FETCH_BYTES = 8 * 1024   # 8KB
+SCREENSHOT_MAX_AGE_DAYS = 7  # screenshots older than this are pruned at startup
 MAX_NOTE_SIZE = 16 * 1024    # 16KB
 MAX_SNAPSHOT_BYTES = 8 * 1024  # 8KB browser snapshot
 DNS_TIMEOUT = 5.0            # seconds for SSRF hostname DNS resolution
@@ -436,6 +437,20 @@ def _load_user_tools() -> None:
 
 
 _load_user_tools()
+
+
+def prune_old_screenshots() -> None:
+    """Delete screenshots older than SCREENSHOT_MAX_AGE_DAYS. Called at startup."""
+    if not SCREENSHOTS_DIR.exists():
+        return
+    import time as _time
+    cutoff = _time.time() - SCREENSHOT_MAX_AGE_DAYS * 86400
+    for f in SCREENSHOTS_DIR.glob("*.png"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except Exception:
+            pass
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
