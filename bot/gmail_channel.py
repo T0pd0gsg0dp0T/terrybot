@@ -52,12 +52,12 @@ def _extract_body(msg: email.message.Message) -> str:
             cd = str(part.get("Content-Disposition", ""))
             if ct == "text/plain" and "attachment" not in cd:
                 payload = part.get_payload(decode=True)
-                if payload:
+                if isinstance(payload, bytes):
                     charset = part.get_content_charset() or "utf-8"
                     return payload.decode(charset, errors="replace")[:MAX_BODY_CHARS]
     else:
         payload = msg.get_payload(decode=True)
-        if payload:
+        if isinstance(payload, bytes):
             charset = msg.get_content_charset() or "utf-8"
             return payload.decode(charset, errors="replace")[:MAX_BODY_CHARS]
     return "(no plain-text body)"
@@ -96,7 +96,7 @@ class GmailChannel:
         """
         mail = imaplib.IMAP4_SSL(self._cfg.imap_host, self._cfg.imap_port)
         try:
-            mail.login(self._cfg.email, self._password)
+            mail.login(self._cfg.email, self._password or "")
             mail.select(self._cfg.label)
 
             _, data = mail.search(None, "UNSEEN")

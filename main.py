@@ -243,6 +243,7 @@ def cmd_run(telegram: bool, web: bool) -> None:
 
     prune_old_screenshots()
 
+    sessions: SessionStore | PersistentSessionStore
     if settings.agent.persist_sessions:
         sessions = PersistentSessionStore(max_history_turns=settings.agent.max_history_turns)
         print("[main] Using persistent (SQLite) session store.")

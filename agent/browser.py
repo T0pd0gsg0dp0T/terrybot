@@ -8,29 +8,40 @@ Chromium is launched headless on first tool call (lazy init).
 
 from __future__ import annotations
 
+import asyncio
 import sys
-from typing import Optional
+from typing import Any, Optional
+
+MAX_BROWSER_PAGES = 10  # max concurrent open pages; oldest evicted when exceeded
+
+# Guards the singleton lazy-init to prevent two concurrent first-callers
+# from each launching a Chromium process.
+_init_lock = asyncio.Lock()
 
 
 class BrowserManager:
     """
     Singleton manager for a shared Playwright Chromium instance.
-    Each session gets its own isolated Page.
+    Each session gets its own isolated Page; capped at MAX_BROWSER_PAGES.
+    Page creation order is tracked for LRU eviction.
     """
 
     _instance: Optional["BrowserManager"] = None
 
     def __init__(self) -> None:
-        self._playwright = None
-        self._browser = None
-        self._pages: dict[str, object] = {}
+        self._playwright: Optional[Any] = None  # playwright.async_api.Playwright
+        self._browser: Optional[Any] = None     # playwright.async_api.Browser
+        self._pages: dict[str, Any] = {}
+        self._page_order: list[str] = []  # insertion order for LRU eviction
 
     @classmethod
     async def get_instance(cls) -> "BrowserManager":
         """Return the singleton, initializing Playwright on first call."""
-        if cls._instance is None:
-            cls._instance = cls()
-            await cls._instance._init()
+        async with _init_lock:
+            if cls._instance is None:
+                instance = cls()
+                await instance._init()
+                cls._instance = instance
         return cls._instance
 
     async def _init(self) -> None:
@@ -45,17 +56,30 @@ class BrowserManager:
             raise
 
     async def get_or_create_page(self, session_id: str):
-        """Return existing page for session or create a new one."""
+        """Return existing page for session, or create one (evicting oldest if at cap)."""
         if session_id not in self._pages:
             if self._browser is None:
                 raise RuntimeError("Browser not initialized.")
+            # Evict the oldest page if at capacity
+            if len(self._pages) >= MAX_BROWSER_PAGES and self._page_order:
+                oldest = self._page_order[0]
+                await self.close_session_page(oldest)
+                print(
+                    f"[browser] Page cap reached — closed oldest session page {oldest!r}",
+                    file=sys.stderr,
+                )
             page = await self._browser.new_page()
             self._pages[session_id] = page
+            self._page_order.append(session_id)
         return self._pages[session_id]
 
     async def close_session_page(self, session_id: str) -> None:
         """Close and remove the page for a session."""
         page = self._pages.pop(session_id, None)
+        try:
+            self._page_order.remove(session_id)
+        except ValueError:
+            pass
         if page is not None:
             try:
                 await page.close()
