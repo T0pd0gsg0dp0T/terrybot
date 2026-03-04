@@ -7,7 +7,7 @@ Telegram message / WebSocket message
   → allowlist + rate limit + auth
   → input sanitization (strip control chars, escape tags, truncate, wrap)
   → LLM runner (OpenRouter API, model failover, tool-call loop)
-  → per-session isolated history
+  → per-session isolated history (SQLite-backed, survives restarts)
   → tools (datetime, fetch, notes, browser, shell, cross-session messaging)
   → response back to channel
 ```
@@ -31,7 +31,7 @@ Telegram message / WebSocket message
 | `fetch_url` | HTTP GET with SSRF prevention, 8KB text output |
 | `save_note` / `load_note` | Encrypted persistent notes (`~/.terrybot/creds/`) |
 | `sessions_list` | List all active session IDs |
-| `sessions_send` | Send a message to another live session, get its response |
+| `sessions_send` | Send a message to another live session, get its response (loop-safe via ContextVar guard) |
 | `canvas_push` | Push arbitrary HTML to the web UI canvas panel |
 | `system_run` | Execute a shell command (opt-in + user confirmation required) |
 | `browser_navigate` | Navigate headless Chromium to a URL |
@@ -52,14 +52,14 @@ Telegram message / WebSocket message
 - **Model failover** — primary model rate-limited (429/529)? Transparently retries with configured fallback models, same context preserved
 - **Per-session model** — each session can use a different model via `set_session_model`
 - **`/compact`** — LLM summarises conversation history into one message, freeing context
-- **Cron scheduler / Heartbeat** — inject messages into sessions on a schedule (APScheduler), deliver via Telegram, web broadcast, or buffer for offline clients
+- **Cron scheduler / Heartbeat** — inject messages into sessions on a schedule (APScheduler), deliver via Telegram, web broadcast, or buffer for offline clients; per-job timezone support
 - **A2UI canvas panel** — right-hand pane in web UI, updated by `canvas_push` / `browser_screenshot`; supports arbitrary HTML and base64 images
 - **`system_run` with confirmation** — bot proposes shell command, user must reply `confirm` or `deny` before it runs
 - **OS Notifications** — desktop alerts via `notify-send` (Linux) or `osascript` (macOS)
 - **Location services** — IP-based geolocation or manually configured coordinates
 - **Gmail channel** — IMAP polling; incoming emails are injected as messages into a configured session (no GCP required — uses App Password)
-- **Self-improvement** — agent proposes new tools as Python code; you approve/reject in the dashboard; approved tools load dynamically at next startup
-- **Control dashboard** — `/dashboard?token=` shows active sessions, scheduler jobs, pending/approved tools with approve/reject buttons
+- **Self-improvement** — agent proposes new tools as Python code; you approve/reject in the dashboard; approved tools load dynamically at next startup; loader falls back to `def run()` if the canonical name is absent
+- **Control dashboard** — `/dashboard?token=` shows active sessions (including from prior runs), scheduler jobs, pending/approved tools with approve/reject buttons
 
 ---
 
@@ -72,16 +72,20 @@ Security is layered, enforced at startup via `python3.11 main.py audit`.
 | Allowlist | `bot/telegram_bot.py` | Silently drops DMs from non-listed Telegram user IDs |
 | Group gating | `bot/telegram_bot.py` | Only responds in groups when `@mentioned`; per-group ID allowlist |
 | Origin check | `security/origin.py` | Rejects WebSocket connections from non-localhost origins (CSWSH) |
-| Auth + rate limit | `security/auth.py` | HMAC token comparison; 5 failures → 15-min IP lockout |
+| Auth + rate limit | `security/auth.py` | HMAC-normalised timing-safe token compare; 5 failures → 15-min IP lockout, persisted to `~/.terrybot/lockouts.json` |
+| Dashboard CSRF | `bot/web_bot.py` | Per-process token in hidden form fields; POST handlers verify before acting |
+| Dashboard token | `bot/web_bot.py` | HMAC-normalised `_normalize_token` + `compare_digest` — no timing oracle |
+| Webhook HMAC | `bot/web_bot.py` | Optional `X-Hub-Signature-256` check when `webhook_secret` is configured |
 | Input sanitisation | `agent/sanitize.py` | Strips null bytes/control chars, escapes `[USER_MSG]` tags, truncates at 4000 chars, wraps in tags |
 | SSRF prevention | `agent/tools.py` | DNS-resolves hostname, blocks loopback/private/link-local/multicast IPs |
+| Sessions send guard | `agent/tools.py` | ContextVar tracks in-flight session chain; blocks A→B→A loops |
 | Browser upload guard | `agent/tools.py` | `browser_upload` file path must be under `~/.terrybot/` |
 | CSP | `bot/web_bot.py` | SHA-256 hashes of inline `<style>`/`<script>` blocks; `img-src data: blob:` for screenshots |
 | File permissions | `crypto.py` | `~/.terrybot/` 700, `creds/` 700, `*.enc` 600; aborts on violation |
 | Startup audit | `security/audit.py` | Checks all of the above; exits code 1 on CRITICAL findings |
 | `system_run` opt-in | `config.py` + audit | Disabled by default; WARN in audit if enabled |
 
-Secrets (`openrouter_api_key`, `telegram_bot_token`, `web_auth_token`) are stored encrypted with Fernet + HKDF-SHA256 in `~/.terrybot/creds/*.enc`. They are **never** read from `terrybot.yaml`.
+Secrets (`openrouter_api_key`, `telegram_bot_token`, `web_auth_token`, `gmail_app_password`, `webhook_secret`) are stored encrypted with Fernet + HKDF-SHA256 in `~/.terrybot/creds/*.enc`. They are **never** read from `terrybot.yaml`.
 
 ---
 
@@ -109,6 +113,8 @@ playwright install chromium   # only needed for browser tools
 
 ```bash
 # 1. Interactive wizard — encrypts and stores all credentials
+#    Steps: OpenRouter key, Telegram token, web auth token, allowed user IDs,
+#           Gmail App Password (optional), webhook HMAC secret (optional)
 python3.11 main.py setup
 
 # 2. Security self-check — must pass before starting
@@ -143,11 +149,14 @@ telegram:
 web:
   host: "127.0.0.1"             # never change to 0.0.0.0
   port: 8765
+  webhook_secret: ""            # if set, /webhook/{name} requires X-Hub-Signature-256
+                                # store the secret via: python3.11 main.py setup
 
 agent:
   model: "anthropic/claude-sonnet-4-6"
   max_history_turns: 20
   allow_system_run: false        # set true to enable shell execution
+  persist_sessions: true         # false = in-memory only (no SQLite)
 
 scheduler:
   jobs:
@@ -155,6 +164,7 @@ scheduler:
       cron: "0 9 * * 1-5"       # 9am Mon-Fri
       session_id: "123456789"   # Telegram user ID
       message: "Give me a morning briefing."
+      timezone: "America/New_York"  # optional; empty = server local time
 
 gmail:
   enabled: false
@@ -173,7 +183,7 @@ location:
 ### Dashboard
 
 The web dashboard is available at `http://127.0.0.1:8765/dashboard?token=YOUR_TOKEN`. It shows:
-- Active sessions (ID, history turns, current model override)
+- Active sessions (ID, history turns, current model override, pending command) — includes sessions from prior runs when `persist_sessions: true`
 - Scheduler jobs (ID, cron, next run time)
 - Pending tool proposals (agent-written Python, waiting for your approval)
 - Approved tools (loaded at startup)
@@ -192,17 +202,17 @@ The web dashboard is available at `http://127.0.0.1:8765/dashboard?token=YOUR_TO
 
 ### CLI
 ```bash
-python3.11 main.py setup          # credential wizard
+python3.11 main.py setup          # credential wizard (6 steps)
 python3.11 main.py audit          # security self-check
 python3.11 main.py run --both     # start both channels
-python3.11 main.py reset-session  # inform about in-memory sessions (restart to clear)
+python3.11 main.py reset-session  # clear SQLite session data
 ```
 
 ---
 
 ## Webhook endpoint
 
-External services can trigger sessions without auth:
+External services can trigger sessions. Without a secret, the endpoint is rate-limited only:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/webhook/my-event \
@@ -210,7 +220,28 @@ curl -X POST http://127.0.0.1:8765/webhook/my-event \
   -d '{"session_id": "webhook_my-event", "content": "Summarise today'\''s news."}'
 ```
 
+With `webhook_secret` configured, add an HMAC signature:
+
+```bash
+SECRET="your-webhook-secret"
+BODY='{"session_id":"webhook_my-event","content":"Hello"}'
+SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)"
+
+curl -X POST http://127.0.0.1:8765/webhook/my-event \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: $SIG" \
+  -d "$BODY"
+```
+
 Rate-limited at 20 requests/min per IP. `content` is capped at 4000 characters.
+
+---
+
+## Session persistence
+
+With `persist_sessions: true` (the default), conversation history, per-session model overrides, and pending command state are stored in `~/.terrybot/sessions.db` (SQLite). Sessions survive process restarts — your conversation continues where it left off.
+
+Set `persist_sessions: false` for purely in-memory sessions (cleared on restart).
 
 ---
 
@@ -231,24 +262,34 @@ user message
 ### Session isolation
 | Session type | ID format | Lifetime |
 |---|---|---|
-| Telegram DM | `str(user_id)` | Persistent across reconnects |
-| Telegram group | `group_{chat_id}` | Persistent |
+| Telegram DM | `str(user_id)` | Persistent across restarts (SQLite) |
+| Telegram group | `group_{chat_id}` | Persistent across restarts (SQLite) |
 | Web UI | `web_{uuid4().hex}` | Ephemeral — deleted on WebSocket disconnect |
-| Webhook | `webhook_{name}` or custom | Persistent until restart |
-| Scheduler | Configured `session_id` | Persistent |
+| Webhook | `webhook_{name}` or custom | Persistent across restarts (SQLite) |
+| Scheduler | Configured `session_id` | Persistent across restarts (SQLite) |
 
 ### Tool loop
-`runner.py` runs up to `MAX_TOOL_ITERATIONS = 5` tool calls per turn, with a hard `RUN_TURN_TIMEOUT = 120s` via `asyncio.timeout`. Session history always gets a paired assistant message in the `finally` block, even on exception.
+`runner.py` runs up to `MAX_TOOL_ITERATIONS = 5` tool calls per turn, with a hard `RUN_TURN_TIMEOUT = 120s` via `asyncio.timeout`. Session history always gets a paired assistant message in the `finally` block, and is flushed to SQLite, even on exception.
 
 ### Adding a tool
 
-**Option A — Ask the agent (self-improvement):** Tell Terrybot what you want, it calls `propose_tool`, and the code appears in the dashboard for your review. Approve → it loads on next restart.
+**Option A — Ask the agent (self-improvement):** Tell Terrybot what you want, it calls `propose_tool`, and the code appears in the dashboard for your review. Approve → it loads on next restart. The loader accepts either `def <name>(context, **kwargs)` or `def run(context, **kwargs)`.
 
 **Option B — Hardcode directly:**
 1. Implement the function in `agent/tools.py`
 2. Add its JSON schema to `TOOL_DEFINITIONS`
 3. Add a dispatch branch in `dispatch_tool()`
 4. If it needs session/runner access, accept `context: ToolContext` as first argument
+
+---
+
+## Testing
+
+```bash
+python3.11 -m pytest tests/ -v
+```
+
+43 tests covering: input sanitisation, SSRF blocking, session round-trips, SQLite persistence (messages + metadata), model/pending_command restore, prior-run dashboard hydration, deadlock guard (self-send + circular A→B→A), lockout persistence and threshold behaviour, delivery routing, tool manager lifecycle.
 
 ---
 
@@ -261,25 +302,34 @@ terrybot/
 ├── crypto.py                # Fernet credential store
 ├── requirements.txt
 ├── terrybot.yaml.example
+├── pytest.ini               # asyncio_mode = auto
 ├── agent/
 │   ├── browser.py           # Playwright singleton manager
 │   ├── context.py           # ToolContext dataclass
-│   ├── runner.py            # OpenRouter LLM runner + failover + compact
+│   ├── runner.py            # OpenRouter LLM runner + failover + compact + flush
 │   ├── sanitize.py          # Input sanitisation + system prompt
-│   ├── session.py           # Per-session history + canvas queue + model override
+│   ├── session.py           # SessionStore + PersistentSessionStore (SQLite)
 │   ├── tool_manager.py      # Propose / approve / reject / load user tools
 │   └── tools.py             # All 21 tool implementations + dispatcher
 ├── bot/
 │   ├── delivery.py          # Heartbeat routing (Telegram / web broadcast / buffer)
 │   ├── gmail_channel.py     # IMAP polling → session injection
 │   ├── notifications.py     # OS desktop notifications
-│   ├── scheduler.py         # APScheduler cron runner
+│   ├── scheduler.py         # APScheduler cron runner (timezone-aware)
 │   ├── telegram_bot.py      # Telegram handler
 │   └── web_bot.py           # FastAPI WebSocket UI + dashboard + webhook endpoint
-└── security/
-    ├── audit.py             # Startup security self-check
-    ├── auth.py              # Token verification + IP rate limiter
-    └── origin.py            # WebSocket origin validation
+├── security/
+│   ├── audit.py             # Startup security self-check
+│   ├── auth.py              # Token verification + IP rate limiter (lockout persistence)
+│   └── origin.py            # WebSocket origin validation
+└── tests/
+    ├── conftest.py           # Fixtures: settings, tmp_terrybot, fake_runner
+    ├── test_auth.py          # Token verify, rate limit, lockout persistence (5 tests)
+    ├── test_delivery.py      # Web queue, buffer, flush, Telegram notify (4 tests)
+    ├── test_sanitize.py      # Control chars, tags, truncation, wrapping (8 tests)
+    ├── test_session.py       # In-memory + SQLite stores, metadata persist (10 tests)
+    ├── test_tool_manager.py  # Propose, approve, reject, remove, run-fallback (5 tests)
+    └── test_tools.py         # datetime, notes, SSRF, deadlock guard (9 tests)
 ```
 
 ---
