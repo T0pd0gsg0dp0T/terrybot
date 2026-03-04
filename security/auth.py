@@ -13,15 +13,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 
 LOCKOUT_THRESHOLD = 5          # failures before lockout
 LOCKOUT_DURATION = 15 * 60    # seconds (15 minutes)
+
+LOCKOUT_FILE = Path.home() / ".terrybot" / "lockouts.json"
 
 # Static HMAC key for length-normalizing comparison. Not a secret —
 # its purpose is to produce fixed-length (32-byte) digests so that
@@ -58,7 +62,7 @@ class AuthResult:
 
 
 class RateLimiter:
-    """Per-IP failure tracking with automatic lockout."""
+    """Per-IP failure tracking with automatic lockout (persisted across restarts)."""
 
     def __init__(
         self,
@@ -68,6 +72,40 @@ class RateLimiter:
         self._threshold = threshold
         self._lockout_duration = lockout_duration
         self._clients: dict[str, _ClientState] = {}
+        self._load_lockouts()
+
+    def _load_lockouts(self) -> None:
+        """Restore any active lockouts from disk on startup."""
+        if not LOCKOUT_FILE.exists():
+            return
+        try:
+            data = json.loads(LOCKOUT_FILE.read_text())
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            for ip, wall_until in data.items():
+                if wall_until > now_wall:  # still active
+                    mono_until = now_mono + (wall_until - now_wall)
+                    self._clients[ip] = _ClientState(
+                        fail_count=LOCKOUT_THRESHOLD,
+                        lockout_until=mono_until,
+                    )
+        except Exception:
+            pass
+
+    def _save_lockouts(self) -> None:
+        """Persist active lockouts to disk."""
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        data: dict[str, float] = {}
+        for ip, state in self._clients.items():
+            if state.lockout_until > now_mono:
+                wall_until = now_wall + (state.lockout_until - now_mono)
+                data[ip] = wall_until
+        try:
+            LOCKOUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            LOCKOUT_FILE.write_text(json.dumps(data))
+        except Exception:
+            pass
 
     def _state(self, client_ip: str) -> _ClientState:
         if client_ip not in self._clients:
@@ -92,6 +130,7 @@ class RateLimiter:
                 f"after {state.fail_count} failed auth attempts",
                 file=sys.stderr,
             )
+            self._save_lockouts()  # persist only when a lockout is triggered
 
     def record_success(self, client_ip: str) -> None:
         """Reset failure counter on successful auth."""

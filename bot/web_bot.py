@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac as _hmac
 import re
+import secrets
 import sys
 import time
 import uuid
@@ -39,7 +41,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from agent.runner import LLMRunner
 from agent.tools import execute_pending_command
 from bot.delivery import DeliveryManager
-from security.auth import get_rate_limiter, verify_token
+from security.auth import _normalize_token, get_rate_limiter, verify_token
 from security.origin import validate_ws_origin
 
 if TYPE_CHECKING:
@@ -342,7 +344,7 @@ def _html_escape(s: str) -> str:
 
 
 def _render_sessions(runner: LLMRunner) -> str:
-    sessions = runner._sessions._sessions
+    sessions = runner._sessions.all_sessions()
     if not sessions:
         return '<p class="empty">No active sessions.</p>'
     rows = ""
@@ -373,12 +375,13 @@ def _render_jobs(scheduler) -> str:
     return "<table><tr><th>ID</th><th>Name</th><th>Next run</th></tr>" + rows + "</table>"
 
 
-def _render_pending(token: str) -> str:
+def _render_pending(token: str, csrf_token: str = "") -> str:
     from agent.tool_manager import list_pending
     tools = list_pending()
     if not tools:
         return '<p class="empty">No pending proposals.</p>'
     html = ""
+    csrf_input = f'<input type="hidden" name="csrf_token" value="{_html_escape(csrf_token)}">'
     for t in tools:
         name = _html_escape(t["name"])
         code = _html_escape(t["code"])
@@ -387,20 +390,21 @@ def _render_pending(token: str) -> str:
             f'<h3>{name}</h3>'
             f'<pre>{code}</pre>'
             f'<form method="post" action="/dashboard/tools/{name}/approve?token={_html_escape(token)}" style="display:inline">'
-            f'<button class="btn btn-approve" type="submit">Approve</button></form>'
+            f'{csrf_input}<button class="btn btn-approve" type="submit">Approve</button></form>'
             f'<form method="post" action="/dashboard/tools/{name}/reject?token={_html_escape(token)}" style="display:inline">'
-            f'<button class="btn btn-reject" type="submit">Reject</button></form>'
+            f'{csrf_input}<button class="btn btn-reject" type="submit">Reject</button></form>'
             f'</div>'
         )
     return html
 
 
-def _render_approved(token: str) -> str:
+def _render_approved(token: str, csrf_token: str = "") -> str:
     from agent.tool_manager import list_approved
     tools = list_approved()
     if not tools:
         return '<p class="empty">No approved tools.</p>'
     html = ""
+    csrf_input = f'<input type="hidden" name="csrf_token" value="{_html_escape(csrf_token)}">'
     for t in tools:
         name = _html_escape(t["name"])
         code = _html_escape(t["code"])
@@ -409,7 +413,7 @@ def _render_approved(token: str) -> str:
             f'<h3><span class="badge badge-ok">active</span> {name}</h3>'
             f'<pre>{code}</pre>'
             f'<form method="post" action="/dashboard/tools/{name}/remove-approved?token={_html_escape(token)}" style="display:inline">'
-            f'<button class="btn btn-remove" type="submit">Remove</button></form>'
+            f'{csrf_input}<button class="btn btn-remove" type="submit">Remove</button></form>'
             f'</div>'
         )
     return html
@@ -436,6 +440,7 @@ def create_app(
 
     auth_token = settings.web.auth_token
     rate_limiter = get_rate_limiter()
+    _csrf_token = secrets.token_hex(32)  # stable per process lifetime
 
     _webhook_timestamps: dict[str, list[float]] = {}
 
@@ -451,9 +456,8 @@ def create_app(
 
     def _check_dashboard_token(request: Request) -> bool:
         provided = request.query_params.get("token", "")
-        import hmac
-        return bool(auth_token) and hmac.compare_digest(
-            provided.encode(), auth_token.encode()
+        return bool(auth_token) and secrets.compare_digest(
+            _normalize_token(provided), _normalize_token(auth_token)
         )
 
     # ── Static routes ─────────────────────────────────────────────────────────
@@ -478,8 +482,8 @@ def create_app(
             .replace("{token}", _html_escape(token))
             .replace("{sessions_html}", _render_sessions(runner))
             .replace("{jobs_html}", _render_jobs(scheduler))
-            .replace("{pending_html}", _render_pending(token))
-            .replace("{approved_html}", _render_approved(token))
+            .replace("{pending_html}", _render_pending(token, _csrf_token))
+            .replace("{approved_html}", _render_approved(token, _csrf_token))
         )
         return HTMLResponse(content=html)
 
@@ -487,6 +491,9 @@ def create_app(
     async def dashboard_approve(name: str, request: Request):
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
+        form_data = await request.form()
+        if form_data.get("csrf_token") != _csrf_token:
+            return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import approve_tool
         approve_tool(name)
         token = request.query_params.get("token", "")
@@ -496,6 +503,9 @@ def create_app(
     async def dashboard_reject(name: str, request: Request):
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
+        form_data = await request.form()
+        if form_data.get("csrf_token") != _csrf_token:
+            return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import reject_tool
         reject_tool(name)
         token = request.query_params.get("token", "")
@@ -505,6 +515,9 @@ def create_app(
     async def dashboard_remove(name: str, request: Request):
         if not _check_dashboard_token(request):
             return HTMLResponse("Unauthorized", status_code=401)
+        form_data = await request.form()
+        if form_data.get("csrf_token") != _csrf_token:
+            return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import remove_approved_tool
         remove_approved_tool(name)
         token = request.query_params.get("token", "")
@@ -516,7 +529,7 @@ def create_app(
     async def api_sessions(request: Request) -> JSONResponse:
         if not _check_dashboard_token(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
-        sessions = runner._sessions._sessions
+        sessions = runner._sessions.all_sessions()
         return JSONResponse([
             {
                 "id": sid,
@@ -565,11 +578,24 @@ def create_app(
         if request.client:
             client_ip = request.client.host
 
+        # HMAC signature check (optional — only if webhook_secret is configured)
+        if settings.web.webhook_secret:
+            sig_header = request.headers.get("X-Hub-Signature-256", "")
+            raw_body = await request.body()
+            expected = "sha256=" + _hmac.new(
+                settings.web.webhook_secret.encode(), raw_body, hashlib.sha256
+            ).hexdigest()
+            if not secrets.compare_digest(sig_header.encode(), expected.encode()):
+                return JSONResponse({"error": "Invalid signature"}, status_code=401)
+        else:
+            raw_body = await request.body()
+
         if not _webhook_allowed(client_ip):
             return JSONResponse({"error": "Rate limit exceeded."}, status_code=429)
 
         try:
-            body = await request.json()
+            import json as _json
+            body = _json.loads(raw_body)
         except Exception:
             return JSONResponse({"error": "Invalid JSON body."}, status_code=400)
 

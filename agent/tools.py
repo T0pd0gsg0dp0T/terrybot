@@ -22,6 +22,7 @@ and appended to TOOL_DEFINITIONS and the dispatcher automatically.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import ipaddress
 import re
 import socket
@@ -33,6 +34,12 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
+
+# Tracks which sessions are currently in a sessions_send call chain.
+# Used to detect and prevent A→B→A circular message loops.
+_sessions_in_flight: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
+    "_sessions_in_flight", default=frozenset()
+)
 
 import httpx
 
@@ -535,12 +542,17 @@ def sessions_list(context: "ToolContext") -> str:
 
 async def sessions_send(context: "ToolContext", target_session_id: str, message: str) -> str:
     """Send a message to another session and return its response."""
-    if target_session_id == context.session_id:
-        return "Error: Cannot send to own session (infinite loop prevention)."
     if not target_session_id or not message:
         return "Error: target_session_id and message are required."
+    in_flight = _sessions_in_flight.get()
+    if target_session_id == context.session_id or target_session_id in in_flight:
+        return f"Error: Cannot send to '{target_session_id}' — would create a message loop."
     message = message[:4000]
-    response = await context.runner.run_turn(target_session_id, message)
+    token = _sessions_in_flight.set(in_flight | {context.session_id})
+    try:
+        response = await context.runner.run_turn(target_session_id, message)
+    finally:
+        _sessions_in_flight.reset(token)
     return response
 
 

@@ -32,6 +32,9 @@ web:
   port: 8765
   # Do NOT put your real auth token here. Run `python main.py setup` to generate and encrypt it.
   auth_token: ""
+  # Optional HMAC secret for POST /webhook/{name}. If set, requests must include
+  # X-Hub-Signature-256: sha256=<hmac-hex> computed over the raw request body.
+  webhook_secret: ""
 
 agent:
   model: "anthropic/claude-sonnet-4-6"
@@ -41,6 +44,8 @@ agent:
   # Users are prompted to confirm before commands run.
   # WARNING: This allows arbitrary shell execution — use with caution.
   allow_system_run: false
+  # Set to false to disable SQLite session persistence (in-memory only).
+  persist_sessions: true
 
 scheduler:
   # Scheduled jobs that inject messages into sessions at cron-defined times.
@@ -52,10 +57,12 @@ scheduler:
   #     cron: "0 9 * * 1-5"          # 9am Mon-Fri
   #     session_id: "123456789"       # Telegram user ID (string)
   #     message: "Give me a morning briefing."
+  #     timezone: "America/New_York"  # optional; empty = server local time
   #   - id: "hourly_check"
   #     cron: "0 * * * *"
   #     session_id: "group_-100123456789"
   #     message: "Any updates?"
+  #     timezone: ""
 
 gmail:
   enabled: false

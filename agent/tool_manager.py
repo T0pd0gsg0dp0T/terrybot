@@ -187,13 +187,13 @@ def load_approved_tools() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             spec.loader.exec_module(module)  # type: ignore[attr-defined]
 
             tool_def = getattr(module, "TOOL_DEFINITION", None)
-            func = getattr(module, name, None)
+            func = getattr(module, name, None) or getattr(module, "run", None)
 
             if tool_def is None:
                 print(f"[tool_manager] {name}.py missing TOOL_DEFINITION — skipped", file=sys.stderr)
                 continue
             if func is None or not callable(func):
-                print(f"[tool_manager] {name}.py missing callable '{name}' — skipped", file=sys.stderr)
+                print(f"[tool_manager] {name}.py missing callable '{name}' or 'run' — skipped", file=sys.stderr)
                 continue
 
             # Wrap in standard format

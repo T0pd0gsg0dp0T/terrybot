@@ -34,7 +34,7 @@ class TerryScheduler:
 
         for job in settings.scheduler.jobs:
             try:
-                trigger = CronTrigger.from_crontab(job.cron)
+                trigger = CronTrigger.from_crontab(job.cron, timezone=job.timezone or None)
                 self._scheduler.add_job(
                     self._run_job,
                     trigger,

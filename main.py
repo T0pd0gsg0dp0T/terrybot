@@ -92,6 +92,32 @@ def cmd_setup() -> None:
     # Write/update terrybot.yaml with non-secret settings
     _write_config_file(ids_raw)
 
+    # Gmail App Password
+    print("5. Gmail App Password (optional)")
+    print("   Create at: https://myaccount.google.com/apppasswords")
+    pw = getpass.getpass("   App Password (leave blank to skip): ").strip()
+    if pw:
+        store.store("gmail_app_password", pw)
+        print("   ✓ Gmail App Password stored.\n")
+    else:
+        print("   ⚠ Skipped.\n")
+
+    # Webhook HMAC secret
+    print("6. Webhook HMAC secret (optional)")
+    print("   If set, POST /webhook/{name} requires X-Hub-Signature-256 header.")
+    print("   Leave blank to allow unauthenticated webhook calls (rate-limited only).")
+    ws_raw = input("   Webhook secret (leave blank to generate one, 'skip' to disable): ").strip()
+    if ws_raw.lower() == "skip":
+        print("   ⚠ Webhook HMAC disabled — webhook endpoint has no signature check.\n")
+    else:
+        webhook_secret = ws_raw or secrets.token_hex(32)
+        store.store("webhook_secret", webhook_secret)
+        if ws_raw:
+            print("   ✓ Webhook secret stored.\n")
+        else:
+            print(f"   ✓ Webhook secret generated: {webhook_secret}")
+            print("   Add X-Hub-Signature-256 to webhook callers.\n")
+
     print()
     print("=" * 56)
     print(" Setup complete! Next steps:")
@@ -137,6 +163,7 @@ def _write_config_file(ids_raw: str) -> None:
         "agent": {
             "model": existing.get("agent", {}).get("model", "anthropic/claude-sonnet-4-6"),
             "max_history_turns": existing.get("agent", {}).get("max_history_turns", 20),
+            "persist_sessions": existing.get("agent", {}).get("persist_sessions", True),
         },
     }
 
@@ -194,6 +221,7 @@ def _load_settings_with_secrets():
     settings.openrouter.api_key = store.load("openrouter_api_key") or ""
     settings.telegram.bot_token = store.load("telegram_bot_token") or ""
     settings.web.auth_token = store.load("web_auth_token") or ""
+    settings.web.webhook_secret = store.load("webhook_secret") or ""
 
     return settings
 
@@ -208,27 +236,78 @@ def cmd_run(telegram: bool, web: bool) -> None:
     audit_and_exit_on_critical(settings)
 
     from agent.runner import LLMRunner
-    from agent.session import SessionStore
+    from agent.session import PersistentSessionStore, SessionStore
 
-    sessions = SessionStore(max_history_turns=settings.agent.max_history_turns)
+    if settings.agent.persist_sessions:
+        sessions = PersistentSessionStore(max_history_turns=settings.agent.max_history_turns)
+        print("[main] Using persistent (SQLite) session store.")
+    else:
+        sessions = SessionStore(max_history_turns=settings.agent.max_history_turns)
     runner = LLMRunner(settings=settings, sessions=sessions)
 
-    if telegram and web:
-        asyncio.run(_run_both(settings, runner))
-    elif telegram:
-        _run_telegram(settings, runner)
-    elif web:
-        asyncio.run(_run_web(settings, runner))
-    else:
-        print("[main] No channel selected. Use --telegram, --web, or --both.", file=sys.stderr)
-        sys.exit(1)
+    try:
+        if telegram and web:
+            asyncio.run(_run_both(settings, runner))
+        elif telegram:
+            asyncio.run(_run_telegram(settings, runner))
+        elif web:
+            asyncio.run(_run_web(settings, runner))
+        else:
+            print("[main] No channel selected. Use --telegram, --web, or --both.", file=sys.stderr)
+            sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n[main] Stopped.", file=sys.stderr)
 
 
-def _run_telegram(settings, runner) -> None:
+async def _build_telegram_stack(settings, runner):
+    """
+    Shared setup for any mode that uses Telegram.
+    Returns (tg_app, delivery, scheduler) with the notify callback wired in.
+    Also starts the Gmail channel if configured.
+    """
+    from bot.delivery import DeliveryManager
+    from bot.scheduler import TerryScheduler
     from bot.telegram_bot import TelegramBot
-    bot = TelegramBot(settings=settings, runner=runner)
-    print(f"[main] Starting Telegram bot...")
-    bot.run()
+
+    tg_bot = TelegramBot(settings=settings, runner=runner)
+    tg_app = tg_bot.build_application()
+    delivery = DeliveryManager()
+
+    async def _tg_notify(session_id: str, response: str) -> None:
+        try:
+            if session_id.lstrip("-").isdigit():
+                await tg_app.bot.send_message(chat_id=int(session_id), text=response[:4096])
+            else:
+                print(f"[scheduler] Session {session_id!r}: {response[:100]}", file=sys.stderr)
+        except Exception as e:
+            print(f"[scheduler] Notify failed for {session_id!r}: {type(e).__name__}", file=sys.stderr)
+
+    delivery.set_telegram_notify(_tg_notify)
+    scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
+
+    if settings.gmail.enabled and settings.gmail.email:
+        from bot.gmail_channel import GmailChannel
+        gmail = GmailChannel(settings=settings, runner=runner, notify_callback=delivery.deliver)
+        gmail.start(scheduler.underlying)
+
+    return tg_app, delivery, scheduler
+
+
+async def _run_telegram(settings, runner) -> None:
+    tg_app, delivery, scheduler = await _build_telegram_stack(settings, runner)
+    print("[main] Starting Telegram bot...")
+    async with tg_app:
+        await tg_app.start()
+        if tg_app.updater:
+            await tg_app.updater.start_polling(drop_pending_updates=True)
+        scheduler.start()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            scheduler.stop()
+            if tg_app.updater:
+                await tg_app.updater.stop()
+            await tg_app.stop()
 
 
 async def _run_web(settings, runner) -> None:
@@ -238,11 +317,8 @@ async def _run_web(settings, runner) -> None:
     from bot.web_bot import create_app
 
     delivery = DeliveryManager()
-
     scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
 
-    # Gmail channel (if configured)
-    gmail = None
     if settings.gmail.enabled and settings.gmail.email:
         from bot.gmail_channel import GmailChannel
         gmail = GmailChannel(settings=settings, runner=runner, notify_callback=delivery.deliver)
@@ -265,35 +341,9 @@ async def _run_web(settings, runner) -> None:
 async def _run_both(settings, runner) -> None:
     """Run Telegram and web UI concurrently."""
     import uvicorn
-    from bot.delivery import DeliveryManager
-    from bot.scheduler import TerryScheduler
-    from bot.telegram_bot import TelegramBot
     from bot.web_bot import create_app
 
-    # Build Telegram app first so we can use tg_app.bot in delivery callback
-    tg_bot = TelegramBot(settings=settings, runner=runner)
-    tg_app = tg_bot.build_application()
-
-    delivery = DeliveryManager()
-
-    async def _telegram_notify(session_id: str, response: str) -> None:
-        try:
-            if session_id.lstrip("-").isdigit():
-                await tg_app.bot.send_message(chat_id=int(session_id), text=response[:4096])
-            else:
-                print(f"[scheduler] Session {session_id!r}: {response[:100]}", file=sys.stderr)
-        except Exception as e:
-            print(f"[scheduler] Notify failed for {session_id!r}: {type(e).__name__}", file=sys.stderr)
-
-    delivery.set_telegram_notify(_telegram_notify)
-
-    scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
-
-    # Gmail channel (if configured)
-    if settings.gmail.enabled and settings.gmail.email:
-        from bot.gmail_channel import GmailChannel
-        gmail = GmailChannel(settings=settings, runner=runner, notify_callback=delivery.deliver)
-        gmail.start(scheduler.underlying)
+    tg_app, delivery, scheduler = await _build_telegram_stack(settings, runner)
 
     app = create_app(settings=settings, runner=runner, delivery=delivery, scheduler=scheduler)
     host = settings.web.host
@@ -302,15 +352,13 @@ async def _run_both(settings, runner) -> None:
     server = uvicorn.Server(config)
 
     print(f"[main] Starting web UI at http://{host}:{port}")
-    print(f"[main] Starting Telegram bot...")
+    print("[main] Starting Telegram bot...")
 
     async with tg_app:
         await tg_app.start()
         if tg_app.updater:
             await tg_app.updater.start_polling(drop_pending_updates=True)
-
         scheduler.start()
-
         try:
             await server.serve()
         finally:

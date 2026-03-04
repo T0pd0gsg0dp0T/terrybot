@@ -25,7 +25,7 @@ import httpx
 
 from agent.context import ToolContext
 from agent.sanitize import SYSTEM_PROMPT, detect_injection_attempt, sanitize_user_input
-from agent.session import SessionStore
+from agent.session import PersistentSessionStore, SessionStore
 from agent.tools import TOOL_DEFINITIONS, dispatch_tool
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class LLMRunner:
     Handles tool-call loops, session history, and response delivery.
     """
 
-    def __init__(self, settings: "Settings", sessions: SessionStore) -> None:
+    def __init__(self, settings: "Settings", sessions: "SessionStore | PersistentSessionStore") -> None:
         self._settings = settings
         self._sessions = sessions
 
@@ -51,8 +51,21 @@ class LLMRunner:
     # Use these instead of accessing _sessions directly.
 
     def reset_session(self, session_id: str) -> None:
-        """Clear history for a session."""
-        self._sessions.reset(session_id)
+        """Clear history for a session and release associated browser page."""
+        self._sessions.delete(session_id)
+        try:
+            asyncio.get_running_loop()
+            asyncio.ensure_future(self._close_browser_page(session_id))
+        except RuntimeError:
+            pass  # no running event loop — skip async browser cleanup
+
+    async def _close_browser_page(self, session_id: str) -> None:
+        try:
+            from agent.browser import get_browser_manager
+            mgr = await get_browser_manager()
+            await mgr.close_session_page(session_id)
+        except Exception:
+            pass
 
     def delete_session(self, session_id: str) -> None:
         """Remove a session entirely (e.g., on web disconnect)."""
@@ -108,7 +121,8 @@ class LLMRunner:
 
         summary = choices[0].get("message", {}).get("content", "").strip()
         session.clear()
-        session.add_message("assistant", f"[Conversation summary: {summary}]")
+        session.add_message("system", f"[Conversation summary: {summary}]")
+        self._sessions.flush(session_id)
         return f"History compacted. Summary: {summary}"
 
     async def run_turn(
@@ -261,6 +275,7 @@ class LLMRunner:
         finally:
             # Always append assistant response so session history stays paired
             session.add_message("assistant", final_text)
+            self._sessions.flush(session_id)
 
         return final_text
 

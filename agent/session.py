@@ -8,9 +8,11 @@ History is compacted to max_turns when it grows too large.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 MessageRole = str  # "system" | "user" | "assistant" | "tool"
@@ -135,7 +137,159 @@ class SessionStore:
         """Return list of active session IDs."""
         return list(self._sessions.keys())
 
+    def all_sessions(self) -> dict[str, "Session"]:
+        """Return a snapshot of all sessions (used by dashboard)."""
+        return dict(self._sessions)
+
+    def flush(self, session_id: str) -> None:
+        """No-op: in-memory store needs no persistence."""
+
     def compact_all(self) -> None:
         """Compact all sessions to max_history_turns."""
         for session in self._sessions.values():
             session.compact(self.max_history_turns)
+
+
+class PersistentSessionStore:
+    """
+    SQLite-backed session store. Same interface as SessionStore.
+    Sessions are loaded from DB on first access and flushed on every mutation.
+    """
+
+    DB_PATH = Path.home() / ".terrybot" / "sessions.db"
+
+    def __init__(self, max_history_turns: int = 20) -> None:
+        self.max_history_turns = max_history_turns
+        self._cache: dict[str, Session] = {}
+        self._db = self._open_db()
+
+    def _open_db(self) -> sqlite3.Connection:
+        self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(str(self.DB_PATH), check_same_thread=False)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts REAL NOT NULL
+            )
+        """)
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sid ON messages(session_id, ts)"
+        )
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS session_meta (
+                session_id TEXT PRIMARY KEY,
+                model TEXT,
+                pending_command TEXT
+            )
+        """)
+        db.commit()
+        return db
+
+    def _load_from_db(self, session_id: str) -> Session:
+        session = Session(session_id=session_id)
+        rows = self._db.execute(
+            "SELECT role, content FROM messages WHERE session_id=? ORDER BY ts",
+            (session_id,),
+        ).fetchall()
+        for role, content in rows:
+            session.history.append(Message(role=role, content=content))
+        # Restore session metadata
+        meta = self._db.execute(
+            "SELECT model, pending_command FROM session_meta WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if meta:
+            session.model = meta[0] or None
+            session.pending_command = meta[1] or None
+        return session
+
+    def _flush(self, session_id: str) -> None:
+        """Write-through: replace all rows for this session."""
+        session = self._cache.get(session_id)
+        if session is None:
+            return
+        # Persist messages
+        self._db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+        now = time.time()
+        self._db.executemany(
+            "INSERT INTO messages (session_id, role, content, ts) VALUES (?, ?, ?, ?)",
+            [
+                (session_id, m.role, m.content, now + i * 1e-6)
+                for i, m in enumerate(session.history)
+            ],
+        )
+        # Persist session metadata (model override, pending command)
+        self._db.execute(
+            "INSERT OR REPLACE INTO session_meta (session_id, model, pending_command) "
+            "VALUES (?, ?, ?)",
+            (session_id, session.model, session.pending_command),
+        )
+        self._db.commit()
+
+    def get_or_create(self, session_id: str) -> Session:
+        session_id = str(session_id)
+        if session_id not in self._cache:
+            self._cache[session_id] = self._load_from_db(session_id)
+        return self._cache[session_id]
+
+    def get(self, session_id: str) -> Optional[Session]:
+        session_id = str(session_id)
+        if session_id not in self._cache:
+            # Check DB to see if it exists
+            row = self._db.execute(
+                "SELECT 1 FROM messages WHERE session_id=? LIMIT 1", (session_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            self._cache[session_id] = self._load_from_db(session_id)
+        return self._cache.get(session_id)
+
+    def reset(self, session_id: str) -> None:
+        """Clear history for a session (keep session object)."""
+        session = self.get(str(session_id))
+        if session:
+            session.clear()
+            self._flush(str(session_id))
+
+    def delete(self, session_id: str) -> None:
+        """Remove session from cache and DB."""
+        session_id = str(session_id)
+        self._cache.pop(session_id, None)
+        self._db.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+        self._db.execute("DELETE FROM session_meta WHERE session_id=?", (session_id,))
+        self._db.commit()
+
+    def history_length(self, session_id: str) -> int:
+        session = self.get(str(session_id))
+        return session.history_length() if session else 0
+
+    def list_sessions(self) -> list[str]:
+        """Return list of session IDs with at least one message."""
+        rows = self._db.execute(
+            "SELECT DISTINCT session_id FROM messages"
+        ).fetchall()
+        # Merge with in-memory cache (may have sessions with empty history)
+        db_ids = {row[0] for row in rows}
+        cache_ids = set(self._cache.keys())
+        return list(db_ids | cache_ids)
+
+    def all_sessions(self) -> dict[str, "Session"]:
+        """Return snapshot of all sessions — loads from DB any not yet in cache."""
+        rows = self._db.execute(
+            "SELECT DISTINCT session_id FROM messages"
+        ).fetchall()
+        for (sid,) in rows:
+            if sid not in self._cache:
+                self._cache[sid] = self._load_from_db(sid)
+        return dict(self._cache)
+
+    def flush(self, session_id: str) -> None:
+        """Public flush: write session to SQLite."""
+        self._flush(str(session_id))
+
+    def compact_all(self) -> None:
+        for session_id, session in self._cache.items():
+            session.compact(self.max_history_turns)
+            self._flush(session_id)

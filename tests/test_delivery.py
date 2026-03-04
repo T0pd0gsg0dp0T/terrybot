@@ -1,0 +1,61 @@
+"""
+tests/test_delivery.py — Tests for bot/delivery.py DeliveryManager.
+"""
+from __future__ import annotations
+
+import asyncio
+
+from bot.delivery import DeliveryManager
+
+
+async def test_web_delivery_to_registered_queue():
+    dm = DeliveryManager()
+    q = dm.register_web_client()
+
+    await dm.deliver("web_abc", "hello web")
+
+    assert not q.empty()
+    payload = q.get_nowait()
+    assert payload["message"] == "hello web"
+    assert payload["session_id"] == "web_abc"
+
+
+async def test_offline_buffer_when_no_clients():
+    dm = DeliveryManager()
+
+    await dm.deliver("web_abc", "buffered message")
+
+    # Nothing in any queue (no registered clients)
+    assert "web_abc" in dm._pending
+    assert "buffered message" in dm._pending["web_abc"]
+
+
+async def test_flush_pending_on_reconnect():
+    dm = DeliveryManager()
+
+    # Buffer a message while offline
+    await dm.deliver("web_abc", "you were away")
+    assert dm._pending.get("web_abc")
+
+    # Now client connects
+    q = dm.register_web_client()
+    dm.flush_all_pending_to_web(q)
+
+    # Pending should be cleared and message should be in queue
+    assert not dm._pending
+    payload = q.get_nowait()
+    assert payload["message"] == "you were away"
+
+
+async def test_telegram_notify_callback_called():
+    dm = DeliveryManager()
+    calls = []
+
+    async def fake_notify(session_id, message):
+        calls.append((session_id, message))
+
+    dm.set_telegram_notify(fake_notify)
+    await dm.deliver("123456789", "hi telegram")
+
+    assert len(calls) == 1
+    assert calls[0] == ("123456789", "hi telegram")

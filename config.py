@@ -42,6 +42,7 @@ class WebConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     auth_token: str = ""       # Populated from encrypted store at runtime
+    webhook_secret: str = ""   # if set, POST /webhook/{name} requires X-Hub-Signature-256
 
     @field_validator("host")
     @classmethod
@@ -66,6 +67,7 @@ class AgentConfig(BaseModel):
     model: str = "anthropic/claude-sonnet-4-6"
     max_history_turns: int = 20
     allow_system_run: bool = False
+    persist_sessions: bool = True  # false = in-memory only (no SQLite)
 
     @field_validator("max_history_turns")
     @classmethod
@@ -80,6 +82,7 @@ class SchedulerJob(BaseModel):
     cron: str           # e.g. "0 9 * * 1-5"
     session_id: str     # target session
     message: str        # message to inject
+    timezone: str = ""  # e.g. "America/New_York"; empty = server local time
 
 
 class SchedulerConfig(BaseModel):
