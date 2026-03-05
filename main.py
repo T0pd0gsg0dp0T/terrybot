@@ -101,18 +101,29 @@ def cmd_setup() -> None:
     ids_raw = input("   User IDs (leave blank to keep existing): ").strip()
 
     # Gmail
+    import yaml as _yaml
+    from config import CONFIG_PATH as _CONFIG_PATH
+    _existing_cfg: dict[str, Any] = {}
+    if _CONFIG_PATH.exists():
+        with _CONFIG_PATH.open(encoding="utf-8") as _f:
+            _existing_cfg = _yaml.safe_load(_f) or {}
+    existing_gmail_email: str = _existing_cfg.get("gmail", {}).get("email", "")
+
     print(f"5. Gmail (optional)  {_status('gmail_app_password')}")
     print("   Terrybot can poll your Gmail inbox and inject emails into a session.")
+    if existing_gmail_email:
+        print(f"   Current address: {existing_gmail_email}")
     gmail_email = input("   Gmail address (leave blank to keep existing): ").strip()
+    if not gmail_email:
+        gmail_email = existing_gmail_email
     if gmail_email:
-        pw = input("   App Password (create at https://myaccount.google.com/apppasswords): ").strip()
+        pw = input("   App Password (leave blank to keep existing): ").strip()
         if pw:
             store.store("gmail_app_password", pw)
             print("   ✓ Gmail App Password stored.\n")
         else:
             print("   ⚠ App Password unchanged.\n")
     else:
-        gmail_email = ""
         print("   ⚠ Unchanged.\n")
 
     # Write/update terrybot.yaml with non-secret settings
