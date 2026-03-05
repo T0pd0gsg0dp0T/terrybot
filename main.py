@@ -16,9 +16,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import logging
 import secrets
 import sys
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from config import Settings
@@ -27,9 +30,10 @@ if TYPE_CHECKING:
 
 def _require_python() -> None:
     if sys.version_info < (3, 11):
-        print(
-            f"[main] Python 3.11+ required (got {sys.version_info.major}.{sys.version_info.minor})",
-            file=sys.stderr,
+        logger.error(
+            "Python 3.11+ required (got %d.%d)",
+            sys.version_info.major,
+            sys.version_info.minor,
         )
         sys.exit(1)
 
@@ -38,6 +42,8 @@ def _require_python() -> None:
 
 def cmd_setup() -> None:
     """Interactive setup wizard — collect secrets, encrypt, store."""
+    from logging_setup import setup_logging
+    setup_logging()
     from crypto import CredentialStore
 
     print("=" * 56)
@@ -93,18 +99,23 @@ def cmd_setup() -> None:
     print("   Get your ID from @userinfobot on Telegram.")
     ids_raw = input("   User IDs (e.g. 123456789,987654321): ").strip()
 
-    # Write/update terrybot.yaml with non-secret settings
-    _write_config_file(ids_raw)
-
-    # Gmail App Password
-    print("5. Gmail App Password (optional)")
-    print("   Create at: https://myaccount.google.com/apppasswords")
-    pw = getpass.getpass("   App Password (leave blank to skip): ").strip()
-    if pw:
-        store.store("gmail_app_password", pw)
-        print("   ✓ Gmail App Password stored.\n")
+    # Gmail
+    print("5. Gmail (optional)")
+    print("   Terrybot can poll your Gmail inbox and inject emails into a session.")
+    gmail_email = input("   Gmail address (leave blank to skip): ").strip()
+    if gmail_email:
+        pw = getpass.getpass("   App Password (create at https://myaccount.google.com/apppasswords): ").strip()
+        if pw:
+            store.store("gmail_app_password", pw)
+            print("   ✓ Gmail App Password stored.\n")
+        else:
+            print("   ⚠ App Password skipped — Gmail will not work until you re-run setup.\n")
     else:
+        gmail_email = ""
         print("   ⚠ Skipped.\n")
+
+    # Write/update terrybot.yaml with non-secret settings
+    _write_config_file(ids_raw, gmail_email=gmail_email or None)
 
     # Webhook HMAC secret
     print("6. Webhook HMAC secret (optional)")
@@ -131,7 +142,7 @@ def cmd_setup() -> None:
     print("=" * 56)
 
 
-def _write_config_file(ids_raw: str) -> None:
+def _write_config_file(ids_raw: str, gmail_email: str | None = None) -> None:
     """Write or update terrybot.yaml with validated user IDs and safe defaults."""
     import yaml
     from config import CONFIG_PATH
@@ -174,16 +185,58 @@ def _write_config_file(ids_raw: str) -> None:
         "persist_sessions": existing.get("agent", {}).get("persist_sessions", True),
     }
 
+    if gmail_email:
+        existing_gmail = existing.get("gmail", {})
+        config["gmail"] = {
+            "enabled": existing_gmail.get("enabled", False),
+            "email": gmail_email,
+            "imap_host": existing_gmail.get("imap_host", "imap.gmail.com"),
+            "imap_port": existing_gmail.get("imap_port", 993),
+            "poll_interval": existing_gmail.get("poll_interval", 60),
+            "session_id": existing_gmail.get("session_id", str(user_ids[0]) if user_ids else ""),
+            "label": existing_gmail.get("label", "INBOX"),
+            "max_per_poll": existing_gmail.get("max_per_poll", 5),
+        }
+
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     CONFIG_PATH.chmod(0o600)
     print(f"   ✓ Configuration written to {CONFIG_PATH} (chmod 600).")
 
 
+# ── Show secret ───────────────────────────────────────────────────────────────
+
+def cmd_show_secret(name: str) -> None:
+    """Decrypt and print a stored credential to stdout."""
+    from logging_setup import setup_logging
+    setup_logging()
+    from crypto import CredentialStore
+
+    KNOWN = {
+        "openrouter_api_key",
+        "telegram_bot_token",
+        "web_auth_token",
+        "gmail_app_password",
+        "webhook_secret",
+    }
+    if name not in KNOWN:
+        print(f"Unknown secret '{name}'. Valid names: {', '.join(sorted(KNOWN))}")
+        sys.exit(1)
+
+    store = CredentialStore()
+    value = store.load(name)
+    if value is None:
+        print(f"No secret stored for '{name}'.")
+        sys.exit(1)
+    print(value)
+
+
 # ── Audit ─────────────────────────────────────────────────────────────────────
 
 def cmd_audit() -> None:
     """Run security self-check and print report."""
+    from logging_setup import setup_logging
+    setup_logging()
     from config import load_config
     from crypto import CredentialStore
     from security.audit import print_audit_report, run_audit
@@ -233,14 +286,66 @@ def _load_settings_with_secrets() -> "Settings":
     return settings
 
 
+def _apply_yaml_reload(live: "Settings") -> None:
+    """
+    Reload terrybot.yaml and copy non-secret, mutable fields into the live
+    Settings object so changes take effect without a full restart.
+
+    Secrets (api_key, bot_token, auth_token) are NOT reloaded — they are
+    already in memory and only change via `python main.py setup`.
+
+    Fields reloaded: openrouter.model, openrouter.fallback_models,
+    agent.model, agent.max_history_turns, agent.allow_system_run,
+    agent.session_ttl_days, agent.system_prompt,
+    telegram.allowed_user_ids, telegram.allowed_group_ids,
+    telegram.require_mention_in_groups.
+    """
+    from config import load_config
+    try:
+        fresh = load_config()
+    except Exception as exc:
+        logger.error("SIGHUP reload failed — config error: %s", exc)
+        return
+
+    live.openrouter.model = fresh.openrouter.model
+    live.openrouter.fallback_models = fresh.openrouter.fallback_models
+    live.agent.model = fresh.agent.model
+    live.agent.max_history_turns = fresh.agent.max_history_turns
+    live.agent.allow_system_run = fresh.agent.allow_system_run
+    live.agent.session_ttl_days = fresh.agent.session_ttl_days
+    live.agent.system_prompt = fresh.agent.system_prompt
+    live.telegram.allowed_user_ids = fresh.telegram.allowed_user_ids
+    live.telegram.allowed_group_ids = fresh.telegram.allowed_group_ids
+    live.telegram.require_mention_in_groups = fresh.telegram.require_mention_in_groups
+    logger.info("Config reloaded from terrybot.yaml (SIGHUP).")
+
+
+def _validate_scheduler_config(settings: "Settings") -> None:
+    """Validate all cron expressions in config; exit with code 1 if any are invalid."""
+    from apscheduler.triggers.cron import CronTrigger
+    errors = []
+    for job in settings.scheduler.jobs:
+        try:
+            CronTrigger.from_crontab(job.cron, timezone=job.timezone or None)
+        except Exception as e:
+            errors.append(f"Job {job.id!r}: invalid cron {job.cron!r}: {e}")
+    if errors:
+        for msg in errors:
+            logger.error("Config error: %s", msg)
+        sys.exit(1)
+
+
 def cmd_run(telegram: bool, web: bool) -> None:
     """Start Terrybot channels after security audit."""
+    from logging_setup import setup_logging
+    setup_logging()
     from security.audit import audit_and_exit_on_critical
 
     settings = _load_settings_with_secrets()
 
-    print("[main] Running startup security audit...")
+    logger.info("Running startup security audit...")
     audit_and_exit_on_critical(settings)
+    _validate_scheduler_config(settings)
 
     from agent.runner import LLMRunner
     from agent.session import PersistentSessionStore, SessionStore
@@ -251,9 +356,18 @@ def cmd_run(telegram: bool, web: bool) -> None:
     sessions: SessionStore | PersistentSessionStore
     if settings.agent.persist_sessions:
         sessions = PersistentSessionStore(max_history_turns=settings.agent.max_history_turns)
-        print("[main] Using persistent (SQLite) session store.")
+        logger.info("Using persistent (SQLite) session store.")
     else:
         sessions = SessionStore(max_history_turns=settings.agent.max_history_turns)
+
+    # Prune stale sessions and compact remaining ones at startup.
+    ttl = settings.agent.session_ttl_days
+    if ttl > 0:
+        pruned = sessions.prune_expired_sessions(ttl)
+        if pruned:
+            logger.info("Pruned %d session(s) inactive for >%d days.", pruned, ttl)
+    sessions.compact_all()
+
     runner = LLMRunner(settings=settings, sessions=sessions)
 
     try:
@@ -264,10 +378,10 @@ def cmd_run(telegram: bool, web: bool) -> None:
         elif web:
             asyncio.run(_run_web(settings, runner))
         else:
-            print("[main] No channel selected. Use --telegram, --web, or --both.", file=sys.stderr)
+            logger.error("No channel selected. Use --telegram, --web, or --both.")
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\n[main] Stopped.", file=sys.stderr)
+        logger.info("Stopped.")
 
 
 async def _build_telegram_stack(settings: "Settings", runner: "LLMRunner") -> tuple[Any, Any, Any]:
@@ -289,9 +403,9 @@ async def _build_telegram_stack(settings: "Settings", runner: "LLMRunner") -> tu
             if session_id.lstrip("-").isdigit():
                 await tg_app.bot.send_message(chat_id=int(session_id), text=response[:4096])
             else:
-                print(f"[scheduler] Session {session_id!r}: {response[:100]}", file=sys.stderr)
+                logger.info("Scheduler session %r: %s", session_id, response[:100])
         except Exception as e:
-            print(f"[scheduler] Notify failed for {session_id!r}: {type(e).__name__}", file=sys.stderr)
+            logger.error("Scheduler notify failed for %r: %s", session_id, type(e).__name__)
 
     delivery.set_telegram_notify(_tg_notify)
     scheduler = TerryScheduler(settings=settings, runner=runner, delivery=delivery)
@@ -304,14 +418,31 @@ async def _build_telegram_stack(settings: "Settings", runner: "LLMRunner") -> tu
     return tg_app, delivery, scheduler
 
 
+def _install_sighup_handler(settings: "Settings") -> None:
+    """Register a SIGHUP handler that reloads non-secret config in-place.
+
+    Only available on Unix. On Windows this is a no-op.
+    Send with: kill -HUP <pid>
+    """
+    import signal
+    try:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGHUP, _apply_yaml_reload, settings)
+        logger.info("SIGHUP handler installed (send SIGHUP to reload config).")
+    except (AttributeError, OSError):
+        # Windows or environments without SIGHUP
+        pass
+
+
 async def _run_telegram(settings: "Settings", runner: "LLMRunner") -> None:
     tg_app, delivery, scheduler = await _build_telegram_stack(settings, runner)
-    print("[main] Starting Telegram bot...")
+    logger.info("Starting Telegram bot...")
     async with tg_app:
         await tg_app.start()
         if tg_app.updater:
             await tg_app.updater.start_polling(drop_pending_updates=True)
         scheduler.start()
+        _install_sighup_handler(settings)
         try:
             await asyncio.Event().wait()
         finally:
@@ -339,11 +470,12 @@ async def _run_web(settings: "Settings", runner: "LLMRunner") -> None:
     app = create_app(settings=settings, runner=runner, delivery=delivery, scheduler=scheduler)
     host = settings.web.host
     port = settings.web.port
-    print(f"[main] Starting web UI at http://{host}:{port}")
+    logger.info("Starting web UI at http://%s:%d", host, port)
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
     scheduler.start()
+    _install_sighup_handler(settings)
     try:
         await server.serve()
     finally:
@@ -364,14 +496,15 @@ async def _run_both(settings: "Settings", runner: "LLMRunner") -> None:
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
 
-    print(f"[main] Starting web UI at http://{host}:{port}")
-    print("[main] Starting Telegram bot...")
+    logger.info("Starting web UI at http://%s:%d", host, port)
+    logger.info("Starting Telegram bot...")
 
     async with tg_app:
         await tg_app.start()
         if tg_app.updater:
             await tg_app.updater.start_polling(drop_pending_updates=True)
         scheduler.start()
+        _install_sighup_handler(settings)
         try:
             await server.serve()
         finally:
@@ -385,6 +518,8 @@ async def _run_both(settings: "Settings", runner: "LLMRunner") -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    from logging_setup import setup_logging
+    setup_logging()
     _require_python()
 
     parser = argparse.ArgumentParser(
@@ -396,6 +531,7 @@ Commands:
   run                     Start Terrybot (use --telegram, --web, or --both)
   audit                   Run security self-check
   reset-session           Clear in-memory session history (restart required)
+  show-secret             Print a stored encrypted secret to stdout
 
 Examples:
   python main.py setup
@@ -404,6 +540,7 @@ Examples:
   python main.py run --web
   python main.py audit
   python main.py reset-session --user-id 123456789
+  python main.py show-secret webhook_secret
 """,
     )
 
@@ -431,6 +568,13 @@ Examples:
         help="Telegram user ID (numeric, omit for all)",
     )
 
+    # show-secret
+    show_parser = subparsers.add_parser("show-secret", help="Print a stored secret to stdout")
+    show_parser.add_argument(
+        "name",
+        help="Secret name (openrouter_api_key, telegram_bot_token, web_auth_token, gmail_app_password, webhook_secret)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "setup":
@@ -443,6 +587,8 @@ Examples:
         cmd_audit()
     elif args.command == "reset-session":
         cmd_reset_session(args.user_id)  # already int | None after argparse
+    elif args.command == "show-secret":
+        cmd_show_secret(args.name)
     else:
         parser.print_help()
         sys.exit(1)
