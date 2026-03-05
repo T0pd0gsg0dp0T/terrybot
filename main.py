@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import logging
 import secrets
 import sys
@@ -58,7 +57,7 @@ def cmd_setup() -> None:
     # OpenRouter API key
     print("1. OpenRouter API key")
     print("   Get yours at: https://openrouter.ai/keys")
-    key = getpass.getpass("   API key (sk-or-...): ").strip()
+    key = input("   API key (sk-or-...): ").strip()
     if key:
         store.store("openrouter_api_key", key)
         print("   ✓ OpenRouter API key stored.\n")
@@ -68,7 +67,7 @@ def cmd_setup() -> None:
     # Telegram bot token
     print("2. Telegram bot token")
     print("   Create a bot via @BotFather on Telegram.")
-    token = getpass.getpass("   Bot token (123456:ABC...): ").strip()
+    token = input("   Bot token (123456:ABC...): ").strip()
     if token:
         store.store("telegram_bot_token", token)
         print("   ✓ Telegram bot token stored.\n")
@@ -104,7 +103,7 @@ def cmd_setup() -> None:
     print("   Terrybot can poll your Gmail inbox and inject emails into a session.")
     gmail_email = input("   Gmail address (leave blank to skip): ").strip()
     if gmail_email:
-        pw = getpass.getpass("   App Password (create at https://myaccount.google.com/apppasswords): ").strip()
+        pw = input("   App Password (create at https://myaccount.google.com/apppasswords): ").strip()
         if pw:
             store.store("gmail_app_password", pw)
             print("   ✓ Gmail App Password stored.\n")

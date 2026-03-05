@@ -3,7 +3,8 @@ bot/web_bot.py — FastAPI local web UI + dashboard for Terrybot.
 
 Endpoints:
   GET  /              — Chat UI (WebSocket auth)
-  GET  /dashboard     — Control dashboard (token query param)
+  POST /dashboard/login — Authenticate and set session cookie
+  GET  /dashboard     — Control dashboard (session cookie or token query param)
   POST /dashboard/tools/{name}/approve
   POST /dashboard/tools/{name}/reject
   POST /dashboard/tools/{name}/remove-approved
@@ -27,12 +28,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac as _hmac
+import logging
 import re
 import secrets
-import sys
 import time
 import uuid
 from typing import TYPE_CHECKING, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -52,6 +55,22 @@ if TYPE_CHECKING:
 WS_RATE_LIMIT_REQUESTS = 20
 WS_RATE_LIMIT_WINDOW = 60.0
 WEBHOOK_RATE_LIMIT_REQUESTS = 20
+_DASH_SESSION_TTL = 3600  # seconds — dashboard cookie lifetime
+
+# Regex to strip inline event handler attributes (onerror=, onclick=, etc.)
+_EVENT_HANDLER_RE = re.compile(
+    r"""\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)""",
+    re.IGNORECASE,
+)
+# Regex to neutralise javascript: hrefs
+_JAVASCRIPT_HREF_RE = re.compile(r'href\s*=\s*["\']?\s*javascript:', re.IGNORECASE)
+
+
+def _sanitize_canvas_html(html: str) -> str:
+    """Strip inline event handlers and javascript: hrefs from LLM-generated canvas HTML."""
+    html = _EVENT_HANDLER_RE.sub("", html)
+    html = _JAVASCRIPT_HREF_RE.sub('href="#"', html)
+    return html
 
 
 class _WSRateLimiter:
@@ -108,12 +127,12 @@ _HTML = """<!DOCTYPE html>
 <body>
 <div id="header">
   <span>Terrybot</span>
-  <a id="dash-link" href="#" style="display:none">Dashboard</a>
+  <button id="dash-link" style="display:none;background:none;border:none;color:#7ab3ef;font-size:0.85rem;cursor:pointer;padding:0" onclick="openDashboard()">Dashboard</button>
 </div>
 
 <div id="auth-panel">
   <div style="font-size:1.2rem;">Connect to Terrybot</div>
-  <input type="password" id="token-input" placeholder="Auth token" autocomplete="off">
+  <input type="text" id="token-input" placeholder="Auth token" autocomplete="off">
   <button onclick="connect()">Connect</button>
   <div id="auth-error">Authentication failed. Check your token.</div>
 </div>
@@ -157,7 +176,7 @@ function connect() {
       authenticated = true;
       document.getElementById('auth-panel').style.display = 'none';
       document.getElementById('main-panel').style.display = 'flex';
-      document.getElementById('dash-link').href = '/dashboard?token=' + encodeURIComponent(token);
+      sessionStorage.setItem('terrybot_token', token);
       document.getElementById('dash-link').style.display = 'inline';
       addMessage('system', 'Connected to Terrybot.');
     } else if (data.type === 'auth_fail') {
@@ -207,6 +226,20 @@ function addMessage(role, text) {
 
 function clearCanvas() {
   document.getElementById('canvas-content').innerHTML = '';
+}
+
+function openDashboard() {
+  const token = sessionStorage.getItem('terrybot_token') || '';
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = '/dashboard/login';
+  form.target = '_blank';
+  const inp = document.createElement('input');
+  inp.type = 'hidden'; inp.name = 'token'; inp.value = token;
+  form.appendChild(inp);
+  document.body.appendChild(form);
+  form.submit();
+  document.body.removeChild(form);
 }
 
 document.getElementById('msg-input').addEventListener('keydown', (e) => {
@@ -260,7 +293,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <header>
   <h1>Terrybot Dashboard</h1>
-  <a href="/?token={token}">&#8592; Chat</a>
+  <a href="/">&#8592; Chat</a>
 </header>
 <div class="container">
 
@@ -378,7 +411,7 @@ def _render_jobs(scheduler: "TerryScheduler | None") -> str:
     return "<table><tr><th>ID</th><th>Name</th><th>Next run</th></tr>" + rows + "</table>"
 
 
-def _render_pending(token: str, csrf_token: str = "") -> str:
+def _render_pending(csrf_token: str = "") -> str:
     from agent.tool_manager import list_pending
     tools = list_pending()
     if not tools:
@@ -392,16 +425,16 @@ def _render_pending(token: str, csrf_token: str = "") -> str:
             f'<div class="tool-card">'
             f'<h3>{name}</h3>'
             f'<pre>{code}</pre>'
-            f'<form method="post" action="/dashboard/tools/{name}/approve?token={_html_escape(token)}" style="display:inline">'
+            f'<form method="post" action="/dashboard/tools/{name}/approve" style="display:inline">'
             f'{csrf_input}<button class="btn btn-approve" type="submit">Approve</button></form>'
-            f'<form method="post" action="/dashboard/tools/{name}/reject?token={_html_escape(token)}" style="display:inline">'
+            f'<form method="post" action="/dashboard/tools/{name}/reject" style="display:inline">'
             f'{csrf_input}<button class="btn btn-reject" type="submit">Reject</button></form>'
             f'</div>'
         )
     return html
 
 
-def _render_approved(token: str, csrf_token: str = "") -> str:
+def _render_approved(csrf_token: str = "") -> str:
     from agent.tool_manager import list_approved
     tools = list_approved()
     if not tools:
@@ -415,7 +448,7 @@ def _render_approved(token: str, csrf_token: str = "") -> str:
             f'<div class="tool-card">'
             f'<h3><span class="badge badge-ok">active</span> {name}</h3>'
             f'<pre>{code}</pre>'
-            f'<form method="post" action="/dashboard/tools/{name}/remove-approved?token={_html_escape(token)}" style="display:inline">'
+            f'<form method="post" action="/dashboard/tools/{name}/remove-approved" style="display:inline">'
             f'{csrf_input}<button class="btn btn-remove" type="submit">Remove</button></form>'
             f'</div>'
         )
@@ -445,11 +478,22 @@ def create_app(
     rate_limiter = get_rate_limiter()
     _csrf_token = secrets.token_hex(32)  # stable per process lifetime
 
+    # Dashboard session cookies: maps cookie-value → monotonic expiry time.
+    # Cookie-based auth avoids exposing the auth token in browser history / logs.
+    _dash_sessions: dict[str, float] = {}
+
     _webhook_timestamps: dict[str, list[float]] = {}
+    _webhook_cleanup_due: list[float] = [0.0]  # use list for mutability in closure
 
     def _webhook_allowed(ip: str) -> bool:
         now = time.monotonic()
         window_start = now - 60.0
+        # Periodically evict IPs whose entire timestamp list has expired (every 5 min).
+        if now >= _webhook_cleanup_due[0]:
+            _webhook_cleanup_due[0] = now + 300.0
+            stale = [k for k, v in _webhook_timestamps.items() if not any(t > window_start for t in v)]
+            for k in stale:
+                del _webhook_timestamps[k]
         ts = [t for t in _webhook_timestamps.get(ip, []) if t > window_start]
         if ts:
             _webhook_timestamps[ip] = ts
@@ -457,14 +501,27 @@ def create_app(
             _webhook_timestamps.pop(ip, None)  # evict empty entry
         if len(ts) >= WEBHOOK_RATE_LIMIT_REQUESTS:
             return False
+        if ip not in _webhook_timestamps:
+            _webhook_timestamps[ip] = []
         _webhook_timestamps[ip].append(now)
         return True
 
     def _check_dashboard_token(request: Request) -> bool:
+        """Legacy: validate token from query param (used as fallback)."""
         provided = request.query_params.get("token", "")
         return bool(auth_token) and secrets.compare_digest(
             _normalize_token(provided), _normalize_token(auth_token)
         )
+
+    def _check_dashboard_auth(request: Request) -> bool:
+        """Validate dashboard access: cookie first, then query-param fallback."""
+        cookie = request.cookies.get("terrybot_dash", "")
+        if cookie:
+            expiry = _dash_sessions.get(cookie, 0.0)
+            if expiry > time.monotonic():
+                return True
+        # Fallback: query param (e.g. existing bookmarks)
+        return _check_dashboard_token(request)
 
     # ── Static routes ─────────────────────────────────────────────────────────
 
@@ -478,62 +535,81 @@ def create_app(
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
 
+    @app.post("/dashboard/login", response_model=None)
+    async def dashboard_login(request: Request) -> RedirectResponse | HTMLResponse:
+        """Validate token from POST body, set session cookie, redirect to dashboard."""
+        form_data = await request.form()
+        provided = form_data.get("token", "")
+        if not isinstance(provided, str):
+            provided = ""
+        if not bool(auth_token) or not secrets.compare_digest(
+            _normalize_token(provided), _normalize_token(auth_token)
+        ):
+            return HTMLResponse("Unauthorized", status_code=401)
+        session_value = secrets.token_hex(32)
+        _dash_sessions[session_value] = time.monotonic() + _DASH_SESSION_TTL
+        response = RedirectResponse("/dashboard", status_code=303)
+        response.set_cookie(
+            "terrybot_dash",
+            session_value,
+            max_age=_DASH_SESSION_TTL,
+            httponly=True,
+            samesite="strict",
+        )
+        return response
+
     @app.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return HTMLResponse("Unauthorized", status_code=401)
-        token = request.query_params.get("token", "")
         html = (
             _DASHBOARD_HTML
-            .replace("{token}", _html_escape(token))
+            .replace("{token}", "")
             .replace("{sessions_html}", _render_sessions(runner))
             .replace("{jobs_html}", _render_jobs(scheduler))
-            .replace("{pending_html}", _render_pending(token, _csrf_token))
-            .replace("{approved_html}", _render_approved(token, _csrf_token))
+            .replace("{pending_html}", _render_pending(_csrf_token))
+            .replace("{approved_html}", _render_approved(_csrf_token))
         )
         return HTMLResponse(content=html)
 
-    @app.post("/dashboard/tools/{name}/approve")
+    @app.post("/dashboard/tools/{name}/approve", response_model=None)
     async def dashboard_approve(name: str, request: Request) -> HTMLResponse | RedirectResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
         if form_data.get("csrf_token") != _csrf_token:
             return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import approve_tool
         approve_tool(name)
-        token = request.query_params.get("token", "")
-        return RedirectResponse(f"/dashboard?token={token}", status_code=303)
+        return RedirectResponse("/dashboard", status_code=303)
 
-    @app.post("/dashboard/tools/{name}/reject")
+    @app.post("/dashboard/tools/{name}/reject", response_model=None)
     async def dashboard_reject(name: str, request: Request) -> HTMLResponse | RedirectResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
         if form_data.get("csrf_token") != _csrf_token:
             return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import reject_tool
         reject_tool(name)
-        token = request.query_params.get("token", "")
-        return RedirectResponse(f"/dashboard?token={token}", status_code=303)
+        return RedirectResponse("/dashboard", status_code=303)
 
-    @app.post("/dashboard/tools/{name}/remove-approved")
+    @app.post("/dashboard/tools/{name}/remove-approved", response_model=None)
     async def dashboard_remove(name: str, request: Request) -> HTMLResponse | RedirectResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return HTMLResponse("Unauthorized", status_code=401)
         form_data = await request.form()
         if form_data.get("csrf_token") != _csrf_token:
             return HTMLResponse("Forbidden", status_code=403)
         from agent.tool_manager import remove_approved_tool
         remove_approved_tool(name)
-        token = request.query_params.get("token", "")
-        return RedirectResponse(f"/dashboard?token={token}", status_code=303)
+        return RedirectResponse("/dashboard", status_code=303)
 
     # ── Dashboard JSON APIs ───────────────────────────────────────────────────
 
     @app.get("/api/sessions")
     async def api_sessions(request: Request) -> JSONResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         sessions = runner._sessions.all_sessions()
         return JSONResponse([
@@ -549,7 +625,7 @@ def create_app(
 
     @app.get("/api/jobs")
     async def api_jobs(request: Request) -> JSONResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         if scheduler is None:
             return JSONResponse([])
@@ -564,14 +640,14 @@ def create_app(
 
     @app.get("/api/pending")
     async def api_pending(request: Request) -> JSONResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         from agent.tool_manager import list_pending
         return JSONResponse(list_pending())
 
     @app.get("/api/approved")
     async def api_approved(request: Request) -> JSONResponse:
-        if not _check_dashboard_token(request):
+        if not _check_dashboard_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         from agent.tool_manager import list_approved
         return JSONResponse(list_approved())
@@ -622,7 +698,7 @@ def create_app(
             response = await runner.run_turn(session_id, content)
             return JSONResponse({"response": response})
         except Exception as e:
-            print(f"[web] Webhook error for {name!r}: {type(e).__name__}", file=sys.stderr)
+            logger.error("Webhook error for %r: %s", name, type(e).__name__)
             return JSONResponse({"error": "Internal error."}, status_code=500)
 
     # ── WebSocket ─────────────────────────────────────────────────────────────
@@ -689,7 +765,12 @@ def create_app(
                 except Exception:
                     break
 
-        pump_task = asyncio.ensure_future(_delivery_pump())
+        pump_task = asyncio.create_task(_delivery_pump())
+        pump_task.add_done_callback(
+            lambda t: logger.error("Delivery pump crashed: %s", t.exception())
+            if not t.cancelled() and t.exception() is not None
+            else None
+        )
 
         try:
             while True:
@@ -750,11 +831,11 @@ def create_app(
                         session = runner._sessions.get(session_id)
                         if session:
                             for html in session.pop_canvas_updates():
-                                await websocket.send_json({"type": "canvas", "html": html})
+                                await websocket.send_json({"type": "canvas", "html": _sanitize_canvas_html(html)})
 
                         await websocket.send_json({"type": "message", "content": response})
                     except Exception as e:
-                        print(f"[web] Error in session {session_id}: {type(e).__name__}", file=sys.stderr)
+                        logger.error("Error in session %s: %s", session_id, type(e).__name__)
                         await websocket.send_json({"type": "error", "content": "Something went wrong."})
 
         except WebSocketDisconnect:
