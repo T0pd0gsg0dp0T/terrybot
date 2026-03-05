@@ -54,30 +54,32 @@ def cmd_setup() -> None:
 
     store = CredentialStore()
 
+    def _status(name: str) -> str:
+        return "[already set]" if store.exists(name) else "[not set]"
+
     # OpenRouter API key
-    print("1. OpenRouter API key")
+    print(f"1. OpenRouter API key  {_status('openrouter_api_key')}")
     print("   Get yours at: https://openrouter.ai/keys")
-    key = input("   API key (sk-or-...): ").strip()
+    key = input("   API key (leave blank to keep existing): ").strip()
     if key:
         store.store("openrouter_api_key", key)
         print("   ✓ OpenRouter API key stored.\n")
     else:
-        print("   ⚠ Skipped (key left unchanged).\n")
+        print("   ⚠ Unchanged.\n")
 
     # Telegram bot token
-    print("2. Telegram bot token")
+    print(f"2. Telegram bot token  {_status('telegram_bot_token')}")
     print("   Create a bot via @BotFather on Telegram.")
-    token = input("   Bot token (123456:ABC...): ").strip()
+    token = input("   Bot token (leave blank to keep existing): ").strip()
     if token:
         store.store("telegram_bot_token", token)
         print("   ✓ Telegram bot token stored.\n")
     else:
-        print("   ⚠ Skipped.\n")
+        print("   ⚠ Unchanged.\n")
 
     # Web auth token
-    print("3. Web UI auth token")
-    existing = store.exists("web_auth_token")
-    if existing:
+    print(f"3. Web UI auth token  {_status('web_auth_token')}")
+    if store.exists("web_auth_token"):
         regen = input("   A token already exists. Regenerate? [y/N]: ").strip().lower()
         if regen == "y":
             new_token = secrets.token_hex(32)
@@ -85,7 +87,7 @@ def cmd_setup() -> None:
             print(f"   ✓ New web auth token: {new_token}")
             print("   Save this — you'll need it to connect to the web UI.\n")
         else:
-            print("   ⚠ Kept existing token.\n")
+            print("   ⚠ Unchanged.\n")
     else:
         new_token = secrets.token_hex(32)
         store.store("web_auth_token", new_token)
@@ -96,41 +98,52 @@ def cmd_setup() -> None:
     print("4. Telegram allowed user IDs")
     print("   Comma-separated list of Telegram user IDs that can use the bot.")
     print("   Get your ID from @userinfobot on Telegram.")
-    ids_raw = input("   User IDs (e.g. 123456789,987654321): ").strip()
+    ids_raw = input("   User IDs (leave blank to keep existing): ").strip()
 
     # Gmail
-    print("5. Gmail (optional)")
+    print(f"5. Gmail (optional)  {_status('gmail_app_password')}")
     print("   Terrybot can poll your Gmail inbox and inject emails into a session.")
-    gmail_email = input("   Gmail address (leave blank to skip): ").strip()
+    gmail_email = input("   Gmail address (leave blank to keep existing): ").strip()
     if gmail_email:
         pw = input("   App Password (create at https://myaccount.google.com/apppasswords): ").strip()
         if pw:
             store.store("gmail_app_password", pw)
             print("   ✓ Gmail App Password stored.\n")
         else:
-            print("   ⚠ App Password skipped — Gmail will not work until you re-run setup.\n")
+            print("   ⚠ App Password unchanged.\n")
     else:
         gmail_email = ""
-        print("   ⚠ Skipped.\n")
+        print("   ⚠ Unchanged.\n")
 
     # Write/update terrybot.yaml with non-secret settings
     _write_config_file(ids_raw, gmail_email=gmail_email or None)
 
     # Webhook HMAC secret
-    print("6. Webhook HMAC secret (optional)")
+    print(f"6. Webhook HMAC secret (optional)  {_status('webhook_secret')}")
     print("   If set, POST /webhook/{name} requires X-Hub-Signature-256 header.")
-    print("   Leave blank to allow unauthenticated webhook calls (rate-limited only).")
-    ws_raw = input("   Webhook secret (leave blank to generate one, 'skip' to disable): ").strip()
-    if ws_raw.lower() == "skip":
-        print("   ⚠ Webhook HMAC disabled — webhook endpoint has no signature check.\n")
-    else:
-        webhook_secret = ws_raw or secrets.token_hex(32)
-        store.store("webhook_secret", webhook_secret)
-        if ws_raw:
-            print("   ✓ Webhook secret stored.\n")
+    if store.exists("webhook_secret"):
+        ws_raw = input("   New secret, 'generate' for a new random one, or leave blank to keep existing: ").strip()
+        if ws_raw.lower() == "generate":
+            webhook_secret = secrets.token_hex(32)
+            store.store("webhook_secret", webhook_secret)
+            print(f"   ✓ New webhook secret generated: {webhook_secret}\n")
+        elif ws_raw:
+            store.store("webhook_secret", ws_raw)
+            print("   ✓ Webhook secret updated.\n")
         else:
-            print(f"   ✓ Webhook secret generated: {webhook_secret}")
-            print("   Add X-Hub-Signature-256 to webhook callers.\n")
+            print("   ⚠ Unchanged.\n")
+    else:
+        ws_raw = input("   Secret (leave blank to generate one, 'skip' to disable): ").strip()
+        if ws_raw.lower() == "skip":
+            print("   ⚠ Webhook HMAC disabled — endpoint has no signature check.\n")
+        else:
+            webhook_secret = ws_raw or secrets.token_hex(32)
+            store.store("webhook_secret", webhook_secret)
+            if ws_raw:
+                print("   ✓ Webhook secret stored.\n")
+            else:
+                print(f"   ✓ Webhook secret generated: {webhook_secret}")
+                print("   Add X-Hub-Signature-256 to webhook callers.\n")
 
     print()
     print("=" * 56)
