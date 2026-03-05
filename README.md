@@ -289,7 +289,7 @@ user message
 python3.11 -m pytest tests/ -v
 ```
 
-43 tests covering: input sanitisation, SSRF blocking, session round-trips, SQLite persistence (messages + metadata), model/pending_command restore, prior-run dashboard hydration, deadlock guard (self-send + circular A→B→A), lockout persistence and threshold behaviour, delivery routing, tool manager lifecycle.
+172 tests covering: input sanitisation, prompt-injection resistance, SSRF blocking, session round-trips, SQLite persistence (messages + metadata), model/pending_command restore, prior-run dashboard hydration, deadlock guard (self-send + circular A→B→A), lockout persistence and threshold behaviour, delivery routing, tool manager lifecycle, browser tool isolation, Gmail IMAP polling, scheduler, Telegram bot handler, web bot WebSocket + dashboard + webhook, startup audit, origin validation, runner failover, and CLI entry-point behaviour.
 
 ---
 
@@ -323,13 +323,24 @@ terrybot/
 │   ├── auth.py              # Token verification + IP rate limiter (lockout persistence)
 │   └── origin.py            # WebSocket origin validation
 └── tests/
-    ├── conftest.py           # Fixtures: settings, tmp_terrybot, fake_runner
-    ├── test_auth.py          # Token verify, rate limit, lockout persistence (5 tests)
-    ├── test_delivery.py      # Web queue, buffer, flush, Telegram notify (4 tests)
-    ├── test_sanitize.py      # Control chars, tags, truncation, wrapping (8 tests)
-    ├── test_session.py       # In-memory + SQLite stores, metadata persist (10 tests)
-    ├── test_tool_manager.py  # Propose, approve, reject, remove, run-fallback (5 tests)
-    └── test_tools.py         # datetime, notes, SSRF, deadlock guard (9 tests)
+    ├── conftest.py                 # Fixtures: settings, tmp_terrybot, fake_runner
+    ├── test_audit.py               # Startup security self-check (9 tests)
+    ├── test_auth.py                # Token verify, rate limit, lockout persistence (5 tests)
+    ├── test_browser.py             # Playwright singleton, per-session pages (7 tests)
+    ├── test_delivery.py            # Web queue, buffer, flush, Telegram notify (5 tests)
+    ├── test_gmail.py               # IMAP polling, session injection (11 tests)
+    ├── test_main.py                # CLI entry-point: setup, run, audit, reset (11 tests)
+    ├── test_notifications.py       # OS desktop notifications (8 tests)
+    ├── test_origin.py              # WebSocket origin validation (14 tests)
+    ├── test_runner.py              # LLM runner, failover, compact, flush (11 tests)
+    ├── test_sanitize.py            # Control chars, tags, truncation, wrapping (8 tests)
+    ├── test_sanitize_injection.py  # Prompt-injection resistance (14 tests)
+    ├── test_scheduler.py           # APScheduler cron runner (4 tests)
+    ├── test_session.py             # In-memory + SQLite stores, metadata persist (16 tests)
+    ├── test_telegram_bot.py        # Telegram handler, group gating, commands (20 tests)
+    ├── test_tool_manager.py        # Propose, approve, reject, remove, run-fallback (5 tests)
+    ├── test_tools.py               # datetime, notes, SSRF, deadlock guard (10 tests)
+    └── test_web_bot.py             # WebSocket UI, dashboard, webhook endpoint (14 tests)
 ```
 
 ---
