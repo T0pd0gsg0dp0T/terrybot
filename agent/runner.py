@@ -218,14 +218,20 @@ class LLMRunner:
                     messages, model=models[model_idx]
                 )
 
-                # Model failover on rate limit
-                if response_data is None and rate_limited and model_idx < len(models) - 1:
-                    model_idx += 1
-                    logger.warning(
-                        "Rate limited on %r, switching to %r",
-                        models[model_idx - 1],
-                        models[model_idx],
-                    )
+                # Model failover on rate limit / missing model
+                if response_data is None and rate_limited:
+                    if model_idx < len(models) - 1:
+                        model_idx += 1
+                        logger.warning(
+                            "Rate limited on %r, switching to %r",
+                            models[model_idx - 1],
+                            models[model_idx],
+                        )
+                    else:
+                        # All models exhausted — wait briefly and retry from primary
+                        logger.warning("All models rate-limited, waiting 3s then retrying primary.")
+                        await asyncio.sleep(3)
+                        model_idx = 0
                     continue  # retry same iteration with next model
 
                 if response_data is None:
