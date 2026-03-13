@@ -570,7 +570,20 @@ def create_app(
             .replace("{pending_html}", _render_pending(_csrf_token))
             .replace("{approved_html}", _render_approved(_csrf_token))
         )
-        return HTMLResponse(content=html)
+        response = HTMLResponse(content=html)
+        # If authed via query param (no cookie yet), issue a session cookie so
+        # subsequent form POSTs (approve/reject/remove) are authenticated.
+        if not request.cookies.get("terrybot_dash") and _check_dashboard_token(request):
+            session_value = secrets.token_hex(32)
+            _dash_sessions[session_value] = time.monotonic() + _DASH_SESSION_TTL
+            response.set_cookie(
+                "terrybot_dash",
+                session_value,
+                max_age=_DASH_SESSION_TTL,
+                httponly=True,
+                samesite="strict",
+            )
+        return response
 
     @app.post("/dashboard/tools/{name}/approve", response_model=None)
     async def dashboard_approve(name: str, request: Request) -> HTMLResponse | RedirectResponse:
