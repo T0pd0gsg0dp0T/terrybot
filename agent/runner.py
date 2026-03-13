@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from typing import TYPE_CHECKING, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # asyncio.timeout() requires Python 3.11+. main.py enforces this at the CLI
 # entry point, but guard here too so an accidental import on 3.10 fails fast
@@ -35,6 +38,7 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MAX_TOOL_ITERATIONS = 5    # prevent infinite tool-call loops
 HTTP_TIMEOUT = 60.0        # per OpenRouter API call
 RUN_TURN_TIMEOUT = 120.0   # global max per run_turn() call (covers tool loop)
+MAX_TOOL_RESULT_CHARS = 32 * 1024  # 32KB cap on tool output added to session history
 
 
 class LLMRunner:
@@ -54,14 +58,16 @@ class LLMRunner:
         )
 
     async def aclose(self) -> None:
-        """Close the HTTP client and browser on shutdown."""
+        """Close the HTTP client, browser, and shared tools client on shutdown."""
         await self._http_client.aclose()
         try:
             from agent.browser import BrowserManager
             if BrowserManager._instance is not None:
                 await BrowserManager._instance.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Error closing BrowserManager: %s", type(e).__name__)
+        from agent.tools import aclose_tools
+        await aclose_tools()
 
     # ── Public session management API ─────────────────────────────────────────
     # Use these instead of accessing _sessions directly.
@@ -71,7 +77,7 @@ class LLMRunner:
         self._sessions.delete(session_id)
         try:
             asyncio.get_running_loop()
-            asyncio.ensure_future(self._close_browser_page(session_id))
+            asyncio.create_task(self._close_browser_page(session_id))
         except RuntimeError:
             pass  # no running event loop — skip async browser cleanup
 
@@ -161,9 +167,8 @@ class LLMRunner:
             async with asyncio.timeout(RUN_TURN_TIMEOUT):
                 return await self._run_turn_inner(session_id, user_text, stream_callback)
         except asyncio.TimeoutError:
-            print(
-                f"[runner] run_turn timed out after {RUN_TURN_TIMEOUT}s for session {session_id!r}",
-                file=sys.stderr,
+            logger.error(
+                "run_turn timed out after %ss for session %r", RUN_TURN_TIMEOUT, session_id
             )
             # _run_turn_inner's finally block already added the assistant
             # message to session history, so just return the timeout message.
@@ -177,10 +182,7 @@ class LLMRunner:
     ) -> str:
         # Detect prompt injection (log only — we always process)
         if detect_injection_attempt(user_text):
-            print(
-                f"[runner] Possible prompt injection attempt in session {session_id!r}",
-                file=sys.stderr,
-            )
+            logger.debug("Possible prompt injection attempt in session %r", session_id)
 
         # Sanitize and tag user input
         sanitized = sanitize_user_input(user_text)
@@ -192,9 +194,12 @@ class LLMRunner:
         # Compact history if needed
         session.compact(self._settings.agent.max_history_turns)
 
-        # Build message list: system prompt + history
+        # Build message list: system prompt + history.
+        # Use custom system_prompt from config if set, otherwise fall back to the
+        # built-in SYSTEM_PROMPT defined in agent/sanitize.py.
+        active_prompt = self._settings.agent.system_prompt.strip() or SYSTEM_PROMPT
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
+            {"role": "system", "content": active_prompt}
         ] + session.get_messages_for_api()
 
         # Build model failover list (session override takes precedence)
@@ -216,10 +221,10 @@ class LLMRunner:
                 # Model failover on rate limit
                 if response_data is None and rate_limited and model_idx < len(models) - 1:
                     model_idx += 1
-                    print(
-                        f"[runner] Rate limited on {models[model_idx - 1]!r}, "
-                        f"switching to {models[model_idx]!r}",
-                        file=sys.stderr,
+                    logger.warning(
+                        "Rate limited on %r, switching to %r",
+                        models[model_idx - 1],
+                        models[model_idx],
                     )
                     continue  # retry same iteration with next model
 
@@ -254,15 +259,26 @@ class LLMRunner:
                             )
                             if not isinstance(tool_args, dict):
                                 raise ValueError("tool args must be a dict")
+                            tool_result = await dispatch_tool(tool_name, tool_args, context=ctx)
                         except (json.JSONDecodeError, ValueError) as exc:
-                            print(
-                                f"[runner] Bad tool args for '{tool_name}': {exc} "
-                                f"(raw={tool_args_raw!r:.100})",
-                                file=sys.stderr,
+                            logger.error(
+                                "Bad tool args for %r: %s (raw=%.100r)",
+                                tool_name,
+                                exc,
+                                tool_args_raw,
                             )
-                            tool_args = {}
+                            tool_result = (
+                                f"Error: invalid arguments for tool {tool_name!r}: {exc}. "
+                                "Please retry with valid JSON arguments."
+                            )
 
-                        tool_result = await dispatch_tool(tool_name, tool_args, context=ctx)
+                        # Cap tool output size to prevent large results from
+                        # bloating session history and burning tokens.
+                        if len(tool_result) > MAX_TOOL_RESULT_CHARS:
+                            tool_result = (
+                                tool_result[:MAX_TOOL_RESULT_CHARS]
+                                + f"\n[... tool output truncated at {MAX_TOOL_RESULT_CHARS} chars ...]"
+                            )
 
                         messages.append({
                             "role": "tool",
@@ -328,16 +344,13 @@ class LLMRunner:
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             body = e.response.text[:300].replace("\n", " ")
-            print(
-                f"[runner] OpenRouter HTTP {status}: {body}",
-                file=sys.stderr,
-            )
-            is_rate_limited = status in (429, 529)
+            logger.error("OpenRouter HTTP %s: %s", status, body)
+            is_rate_limited = status in (404, 429, 529)
             return None, is_rate_limited
         except httpx.RequestError as e:
-            print(f"[runner] OpenRouter connection error: {type(e).__name__}", file=sys.stderr)
+            logger.error("OpenRouter connection error: %s", type(e).__name__)
             return None, False
         except Exception as e:
-            print(f"[runner] Unexpected OpenRouter error: {type(e).__name__}", file=sys.stderr)
+            logger.error("Unexpected OpenRouter error: %s", type(e).__name__)
             return None, False
 
